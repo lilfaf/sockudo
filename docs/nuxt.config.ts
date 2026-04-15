@@ -18,7 +18,7 @@ export default defineNuxtConfig({
   },
 
   site: {
-    url: "https://sockudo.io",
+    url: "https://docs.sockudo.io",
     name: "Sockudo Docs",
     description:
       "Open-source realtime infrastructure for Pusher-compatible apps, with production docs for Sockudo server and clients.",
