@@ -1,5 +1,33 @@
 # Changelog
 
+## [4.3.0] - 2026-04-20
+
+### Added
+
+- Sockudo-native Protocol V2 mutable messages with stable message identity, preserved version history, and latest-visible history substitution.
+- Realtime mutation delivery for `sockudo:message.update`, `sockudo:message.delete`, and `sockudo:message.append`.
+- Own-versus-any mutation authorization tied to authenticated V2 identities, gated by new `message_update_own`/`message_update_any`/`message_delete_own`/`message_delete_any`/`message_append_own`/`message_append_any` connection capabilities.
+- Client-facing mutable-message consumption guidance across in-repo SDKs, plus JS reducer helpers for replace-versus-concatenate handling.
+- Durable history backends for mutable messages: MySQL, PostgreSQL, DynamoDB, ScyllaDB, and SurrealDB with full schema migrations under `ops/migrations/`.
+
+### Fixed
+
+- Include subscribing member in `subscription_succeeded` response for presence channels.
+- Sync `active_channels` gauge from DashMap instead of increment/decrement to avoid drift under load.
+- Cancel shutdown token on writer death in a way that does not break graceful shutdown or duplicate close frames (PR #220 reverted in #222).
+
+### CI / Build
+
+- Consolidated `cargo audit` ignores into `.cargo/audit.toml` (RUSTSEC-2023-0071, RUSTSEC-2023-0089, RUSTSEC-2025-0134, RUSTSEC-2026-0049).
+- Fixed Docker `Test Docker Image` job on push by wiring `prepare` job outputs into its `needs:` list.
+- Fixed Docker `Security Scan` job by granting `security-events: write` so SARIF uploads succeed.
+
+### Compatibility Notes
+
+- Release 4.3 mutable messages are V2-only Sockudo-native behavior.
+- Protocol V1 remains strictly Pusher-compatible and never receives mutable-message mutation envelopes.
+- Existing immutable history is not backfilled into mutable-message chains.
+
 ## [4.2.0] - 2026-04-11
 
 ### Added
