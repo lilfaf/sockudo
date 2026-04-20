@@ -33,6 +33,7 @@ on:
 permissions:
   contents: read
   packages: write
+  security-events: write
 
 env:
   REGISTRY: ghcr.io
@@ -236,7 +237,7 @@ jobs:
   test:
     name: Test Docker Image
     runs-on: ubuntu-24.04
-    needs: [build-test, docker-manifest]
+    needs: [prepare, build-test, docker-manifest]
     if: always() && (needs.build-test.result == 'success' || needs.docker-manifest.result == 'success')
     
     services:
@@ -259,7 +260,7 @@ jobs:
 
       - name: Build or pull test image
         run: |
-          if [ \"${{ github.event_name }}\" = \"pull_request\" ]; then
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
             # For PR: build locally
             docker build -t sockudo:test .
           else

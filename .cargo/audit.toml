@@ -1,13 +1,26 @@
 # Cargo audit configuration
+#
+# Keep this file as the single source of truth for audit ignores.
+# CI reads these via `cargo audit` (no --ignore flags needed).
 
 [advisories]
-# List of advisory IDs to ignore
 ignore = [
-    # RUSTSEC-2023-0071: RSA Marvin Attack - timing sidechannel vulnerability
-    # This is a transitive dependency via sqlx-mysql that has no fix available yet.
-    # The vulnerability requires network-observable timing attacks which are not 
-    # a high risk for our deployment scenario. We'll remove this ignore once a 
-    # fix is available in the rsa crate.
-    # Tracking issue: https://github.com/RustCrypto/RSA/issues/19
+    # RUSTSEC-2023-0071: RSA Marvin Attack - timing sidechannel vulnerability.
+    # Transitive via sqlx-mysql with no upstream fix available.
+    # Tracking: https://github.com/RustCrypto/RSA/issues/19
     "RUSTSEC-2023-0071",
+
+    # RUSTSEC-2023-0089: atomic-polyfill is unmaintained.
+    # Transitive via surrealdb -> geo-types -> rstar -> heapless 0.7.
+    # No upstream fix until surrealdb updates its geo/rstar chain.
+    "RUSTSEC-2023-0089",
+
+    # RUSTSEC-2025-0134: rustls-native-certs 0.7 warning.
+    # Transitive via async-nats; drops once async-nats releases an update
+    # pointing at rustls-native-certs >= 0.8.
+    "RUSTSEC-2025-0134",
+
+    # RUSTSEC-2026-0049: rustls-webpki < 0.103.10 warning.
+    # Transitive via async-nats; drops once async-nats bumps rustls-webpki.
+    "RUSTSEC-2026-0049",
 ]
