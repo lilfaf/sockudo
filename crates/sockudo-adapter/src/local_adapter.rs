@@ -1146,6 +1146,10 @@ impl LocalAdapter {
             .partition(|s| s.protocol_version == sockudo_protocol::ProtocolVersion::V1)
     }
 
+    fn should_assign_v2_message_id(message: &PusherMessage) -> bool {
+        message.message_id.is_none() && !message.is_protocol_ping_or_pong()
+    }
+
     fn v1_compatible_message(message: &PusherMessage) -> Option<PusherMessage> {
         if extract_runtime_action(message).is_some() {
             return None;
@@ -1456,7 +1460,7 @@ impl ConnectionManager for LocalAdapter {
         match connection.protocol_version {
             sockudo_protocol::ProtocolVersion::V2 => {
                 let mut rewritten = message;
-                if rewritten.message_id.is_none() {
+                if Self::should_assign_v2_message_id(&rewritten) {
                     rewritten.message_id = Some(generate_message_id());
                 }
                 rewritten.rewrite_prefix(sockudo_protocol::ProtocolVersion::V2);
@@ -1968,5 +1972,26 @@ mod tests {
         message.stream_id = Some("stream-1".to_string());
 
         assert!(LocalAdapter::v1_compatible_message(&message).is_none());
+    }
+
+    #[test]
+    fn v2_runtime_message_id_skips_protocol_heartbeats() {
+        assert!(!LocalAdapter::should_assign_v2_message_id(
+            &PusherMessage::ping()
+        ));
+        assert!(!LocalAdapter::should_assign_v2_message_id(
+            &PusherMessage::pong()
+        ));
+    }
+
+    #[test]
+    fn v2_runtime_message_id_still_assigns_regular_messages() {
+        let message = PusherMessage::channel_event(
+            "chat.message",
+            "room",
+            sonic_rs::json!({"text": "hello"}),
+        );
+
+        assert!(LocalAdapter::should_assign_v2_message_id(&message));
     }
 }
