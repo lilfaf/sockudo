@@ -4,9 +4,9 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::StreamExt;
 use iggy::prelude::{
-    AutoCommit, AutoCommitWhen, Client, CompressionAlgorithm, Consumer, ConsumerOffsetClient,
-    IggyClient, IggyDuration, IggyError, IggyExpiry, IggyMessage, IggyProducer, MaxTopicSize,
-    Partitioning, PollingStrategy, StreamClient, SystemClient, TopicClient, UserClient,
+    AutoCommit, Client, CompressionAlgorithm, Consumer, ConsumerOffsetClient, IggyClient,
+    IggyDuration, IggyError, IggyExpiry, IggyMessage, IggyProducer, MaxTopicSize, Partitioning,
+    PollingStrategy, StreamClient, SystemClient, TopicClient, UserClient,
 };
 use sockudo_core::error::{Error, Result};
 use sockudo_core::metrics::MetricsInterface;
@@ -16,8 +16,8 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::sync::Notify;
-use tokio::time::timeout;
-use tracing::{debug, error, info, warn};
+use tokio::time::{sleep, timeout};
+use tracing::{debug, info, warn};
 
 pub struct IggyTransport {
     client: Arc<IggyClient>,
@@ -161,58 +161,85 @@ impl IggyTransport {
         let metrics = self.metrics.clone();
 
         tokio::spawn(async move {
-            let client = match connect_client(&config).await {
-                Ok(client) => Arc::new(client),
-                Err(error) => {
-                    error!("Failed to start Apache Iggy {kind} listener: {}", error);
-                    return;
-                }
-            };
-
-            let consumer =
-                match build_consumer(&client, &config, &stream, &topic, &consumer_name).await {
-                    Ok(consumer) => consumer,
+            let mut retry_attempt = 0;
+            while is_running.load(Ordering::Relaxed) {
+                let client = match connect_client(&config).await {
+                    Ok(client) => Arc::new(client),
                     Err(error) => {
-                        error!(
-                            "Failed to initialize Apache Iggy {kind} consumer: {}",
-                            error
-                        );
-                        let _ = client.shutdown().await;
-                        return;
+                        warn!("Failed to connect Apache Iggy {kind} listener: {error}; retrying");
+                        retry_attempt += 1;
+                        wait_before_retry(&config, retry_attempt, &shutdown, &is_running).await;
+                        continue;
                     }
                 };
-            let mut consumer = consumer;
 
-            loop {
-                if !is_running.load(Ordering::Relaxed) {
-                    break;
-                }
-                tokio::select! {
-                    _ = shutdown.notified() => break,
-                    received = consumer.next() => {
-                        match received {
-                            Some(Ok(received)) => {
-                                match sonic_rs::from_slice::<T>(&received.message.payload) {
-                                    Ok(payload) => handler(payload).await,
-                                    Err(error) => {
-                                        if let Some(metrics) = metrics.get() {
-                                            metrics.mark_horizontal_transport_message_dropped("iggy");
+                let mut consumer = match build_consumer(
+                    &client,
+                    &config,
+                    &stream,
+                    &topic,
+                    &consumer_name,
+                )
+                .await
+                {
+                    Ok(consumer) => {
+                        retry_attempt = 0;
+                        consumer
+                    }
+                    Err(error) => {
+                        warn!(
+                            "Failed to initialize Apache Iggy {kind} consumer: {error}; retrying"
+                        );
+                        if let Err(error) = client.shutdown().await {
+                            warn!("Failed to shutdown Apache Iggy {kind} listener client: {error}");
+                        }
+                        retry_attempt += 1;
+                        wait_before_retry(&config, retry_attempt, &shutdown, &is_running).await;
+                        continue;
+                    }
+                };
+
+                loop {
+                    if !is_running.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    tokio::select! {
+                        _ = shutdown.notified() => break,
+                        received = consumer.next() => {
+                            match received {
+                                Some(Ok(received)) => {
+                                    let partition_id = received.partition_id;
+                                    let offset = received.message.header.offset;
+                                    match sonic_rs::from_slice::<T>(&received.message.payload) {
+                                        Ok(payload) => handler(payload).await,
+                                        Err(error) => {
+                                            if let Some(metrics) = metrics.get() {
+                                                metrics.mark_horizontal_transport_message_dropped("iggy");
+                                            }
+                                            warn!("Failed to parse Apache Iggy {kind} payload: {}", error);
                                         }
-                                        warn!("Failed to parse Apache Iggy {kind} payload: {}", error);
+                                    }
+                                    if let Err(error) = consumer.store_offset(offset, Some(partition_id)).await {
+                                        warn!("Failed to commit Apache Iggy {kind} offset: {error}");
                                     }
                                 }
+                                Some(Err(error)) => warn!("Apache Iggy {kind} consumer failed: {}", error),
+                                None => break,
                             }
-                            Some(Err(error)) => warn!("Apache Iggy {kind} consumer failed: {}", error),
-                            None => break,
                         }
                     }
                 }
-            }
-            if let Err(error) = consumer.shutdown().await {
-                warn!("Failed to shutdown Apache Iggy {kind} consumer: {error}");
-            }
-            if let Err(error) = client.shutdown().await {
-                warn!("Failed to shutdown Apache Iggy {kind} listener client: {error}");
+                if let Err(error) = consumer.shutdown().await {
+                    warn!("Failed to shutdown Apache Iggy {kind} consumer: {error}");
+                }
+                if let Err(error) = client.shutdown().await {
+                    warn!("Failed to shutdown Apache Iggy {kind} listener client: {error}");
+                }
+                if is_running.load(Ordering::Relaxed) {
+                    retry_attempt += 1;
+                    warn!("Apache Iggy {kind} consumer loop ended unexpectedly; retrying");
+                    wait_before_retry(&config, retry_attempt, &shutdown, &is_running).await;
+                }
             }
             warn!("Apache Iggy {kind} consumer loop ended");
         });
@@ -241,89 +268,126 @@ impl IggyTransport {
         let metrics = self.metrics.clone();
 
         tokio::spawn(async move {
-            let client = match connect_client(&config).await {
-                Ok(client) => Arc::new(client),
-                Err(error) => {
-                    error!("Failed to start Apache Iggy request listener: {}", error);
-                    return;
-                }
-            };
+            let mut retry_attempt = 0;
+            while is_running.load(Ordering::Relaxed) {
+                let client = match connect_client(&config).await {
+                    Ok(client) => Arc::new(client),
+                    Err(error) => {
+                        warn!("Failed to connect Apache Iggy request listener: {error}; retrying");
+                        retry_attempt += 1;
+                        wait_before_retry(&config, retry_attempt, &shutdown, &is_running).await;
+                        continue;
+                    }
+                };
 
-            let consumer =
-                match build_consumer(&client, &config, &stream, &topic, &consumer_name).await {
+                let mut consumer = match build_consumer(
+                    &client,
+                    &config,
+                    &stream,
+                    &topic,
+                    &consumer_name,
+                )
+                .await
+                {
                     Ok(consumer) => consumer,
                     Err(error) => {
-                        error!(
-                            "Failed to initialize Apache Iggy request consumer: {}",
-                            error
+                        warn!(
+                            "Failed to initialize Apache Iggy request consumer: {error}; retrying"
                         );
-                        let _ = client.shutdown().await;
-                        return;
+                        if let Err(error) = client.shutdown().await {
+                            warn!(
+                                "Failed to shutdown Apache Iggy request listener client: {error}"
+                            );
+                        }
+                        retry_attempt += 1;
+                        wait_before_retry(&config, retry_attempt, &shutdown, &is_running).await;
+                        continue;
                     }
                 };
-            let response_producer =
-                match build_producer(&client, &config, &stream, &response_topic).await {
-                    Ok(producer) => producer,
+                let response_producer = match build_producer(
+                    &client,
+                    &config,
+                    &stream,
+                    &response_topic,
+                )
+                .await
+                {
+                    Ok(producer) => {
+                        retry_attempt = 0;
+                        producer
+                    }
                     Err(error) => {
-                        error!(
-                            "Failed to initialize Apache Iggy response producer: {}",
-                            error
+                        warn!(
+                            "Failed to initialize Apache Iggy response producer: {error}; retrying"
                         );
-                        let _ = client.shutdown().await;
-                        return;
+                        if let Err(error) = consumer.shutdown().await {
+                            warn!("Failed to shutdown Apache Iggy request consumer: {error}");
+                        }
+                        if let Err(error) = client.shutdown().await {
+                            warn!(
+                                "Failed to shutdown Apache Iggy request listener client: {error}"
+                            );
+                        }
+                        retry_attempt += 1;
+                        wait_before_retry(&config, retry_attempt, &shutdown, &is_running).await;
+                        continue;
                     }
                 };
-            let mut consumer = consumer;
 
-            loop {
-                if !is_running.load(Ordering::Relaxed) {
-                    break;
-                }
-                tokio::select! {
-                    _ = shutdown.notified() => break,
-                    received = consumer.next() => {
-                        match received {
-                            Some(Ok(received)) => {
-                                match sonic_rs::from_slice::<RequestBody>(&received.message.payload) {
-                                    Ok(request) => match handler(request).await {
-                                        Ok(response) => {
-                                            if let Err(error) = publish_message(
-                                                &config,
-                                                &response_producer,
-                                                &response,
-                                            )
-                                            .await
-                                            {
-                                                warn!(
-                                                    "Failed to publish Apache Iggy response: {}",
-                                                    error
-                                                );
+                loop {
+                    if !is_running.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    tokio::select! {
+                        _ = shutdown.notified() => break,
+                        received = consumer.next() => {
+                            match received {
+                                Some(Ok(received)) => {
+                                    let partition_id = received.partition_id;
+                                    let offset = received.message.header.offset;
+                                    let mut should_commit = false;
+                                    match sonic_rs::from_slice::<RequestBody>(&received.message.payload) {
+                                        Ok(request) => match handler(request).await {
+                                            Ok(response) => {
+                                                match publish_message(&config, &response_producer, &response).await {
+                                                    Ok(()) => should_commit = true,
+                                                    Err(error) => warn!("Failed to publish Apache Iggy response: {error}"),
+                                                }
                                             }
+                                            Err(error) => warn!("Apache Iggy request handler failed: {}", error),
                                         }
                                         Err(error) => {
-                                            warn!("Apache Iggy request handler failed: {}", error)
+                                            if let Some(metrics) = metrics.get() {
+                                                metrics.mark_horizontal_transport_message_dropped("iggy");
+                                            }
+                                            warn!("Failed to parse Apache Iggy request payload: {}", error);
+                                            should_commit = true;
                                         }
                                     }
-                                    Err(error) => {
-                                        if let Some(metrics) = metrics.get() {
-                                            metrics.mark_horizontal_transport_message_dropped("iggy");
-                                        }
-                                        warn!("Failed to parse Apache Iggy request payload: {}", error);
+                                    if should_commit
+                                        && let Err(error) = consumer.store_offset(offset, Some(partition_id)).await
+                                    {
+                                        warn!("Failed to commit Apache Iggy request offset: {error}");
                                     }
                                 }
+                                Some(Err(error)) => warn!("Apache Iggy request consumer failed: {}", error),
+                                None => break,
                             }
-                            Some(Err(error)) => warn!("Apache Iggy request consumer failed: {}", error),
-                            None => break,
                         }
                     }
                 }
-            }
-            if let Err(error) = consumer.shutdown().await {
-                warn!("Failed to shutdown Apache Iggy request consumer: {error}");
-            }
-            response_producer.shutdown().await;
-            if let Err(error) = client.shutdown().await {
-                warn!("Failed to shutdown Apache Iggy request listener client: {error}");
+                if let Err(error) = consumer.shutdown().await {
+                    warn!("Failed to shutdown Apache Iggy request consumer: {error}");
+                }
+                response_producer.shutdown().await;
+                if let Err(error) = client.shutdown().await {
+                    warn!("Failed to shutdown Apache Iggy request listener client: {error}");
+                }
+                if is_running.load(Ordering::Relaxed) {
+                    retry_attempt += 1;
+                    warn!("Apache Iggy request consumer loop ended unexpectedly; retrying");
+                    wait_before_retry(&config, retry_attempt, &shutdown, &is_running).await;
+                }
             }
             warn!("Apache Iggy request consumer loop ended");
         });
@@ -360,13 +424,7 @@ impl Drop for IggyTransport {
             self.is_running.store(false, Ordering::Relaxed);
             self.shutdown.notify_waiters();
             let client = self.client.clone();
-            if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                handle.spawn(async move {
-                    if let Err(error) = client.shutdown().await {
-                        warn!("Failed to shutdown Apache Iggy transport client: {error}");
-                    }
-                });
-            }
+            shutdown_client_blocking(client);
         }
     }
 }
@@ -445,14 +503,14 @@ async fn build_consumer(
     }
 
     let mut consumer = client
-        .consumer(consumer_name, stream, topic, config.partition_id)
+        .consumer(consumer_name, stream, topic, 0)
         .map_err(to_iggy_error)?
         .partition(None)
         .poll_interval(IggyDuration::from(Duration::from_millis(
             config.poll_interval_ms,
         )))
         .batch_length(config.poll_batch_size)
-        .auto_commit(AutoCommit::When(AutoCommitWhen::PollingMessages))
+        .auto_commit(AutoCommit::Disabled)
         .polling_strategy(PollingStrategy::next())
         .build();
     with_timeout(config, consumer.init()).await?;
@@ -474,6 +532,14 @@ async fn seed_latest_offsets(
     };
 
     for partition in topic_details.partitions {
+        let existing_offset = with_timeout(
+            config,
+            client.get_consumer_offset(consumer, &stream_id, &topic_id, Some(partition.id)),
+        )
+        .await?;
+        if existing_offset.is_some() {
+            continue;
+        }
         with_timeout(
             config,
             client.store_consumer_offset(
@@ -600,12 +666,6 @@ fn validate_config(config: &IggyConfig) -> Result<()> {
             "Apache Iggy partitions_count must be greater than 0".to_string(),
         ));
     }
-    if config.partition_id >= config.partitions_count {
-        return Err(Error::Config(format!(
-            "Apache Iggy partition_id must be between 0 and partitions_count - 1 ({})",
-            config.partitions_count - 1
-        )));
-    }
     if config.poll_batch_size == 0 {
         return Err(Error::Config(
             "Apache Iggy poll_batch_size must be greater than 0".to_string(),
@@ -623,6 +683,50 @@ fn validate_config(config: &IggyConfig) -> Result<()> {
         }
     }
     Ok(())
+}
+
+async fn wait_before_retry(
+    config: &IggyConfig,
+    attempt: u32,
+    shutdown: &Notify,
+    is_running: &AtomicBool,
+) {
+    if !is_running.load(Ordering::Relaxed) {
+        return;
+    }
+    let multiplier = 1_u64 << attempt.min(5);
+    let delay_ms = config
+        .poll_interval_ms
+        .max(100)
+        .saturating_mul(multiplier)
+        .min(30_000);
+    tokio::select! {
+        _ = shutdown.notified() => {}
+        _ = sleep(Duration::from_millis(delay_ms)) => {}
+    }
+}
+
+fn shutdown_client_blocking(client: Arc<IggyClient>) {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        match std::thread::spawn(move || handle.block_on(client.shutdown())).join() {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => warn!("Failed to shutdown Apache Iggy transport client: {error}"),
+            Err(_) => warn!("Apache Iggy transport shutdown thread panicked"),
+        }
+        return;
+    }
+
+    match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => {
+            if let Err(error) = runtime.block_on(client.shutdown()) {
+                warn!("Failed to shutdown Apache Iggy transport client: {error}");
+            }
+        }
+        Err(error) => warn!("Failed to create runtime for Apache Iggy transport shutdown: {error}"),
+    }
 }
 
 fn stable_consumer_name(config: &IggyConfig) -> String {

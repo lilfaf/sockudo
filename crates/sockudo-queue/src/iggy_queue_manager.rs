@@ -4,27 +4,36 @@ use bytes::Bytes;
 use futures_util::StreamExt;
 use iggy::prelude::{
     AutoCommit, Client, CompressionAlgorithm, ConsumerGroupClient, HeaderKey, HeaderValue,
-    IggyClient, IggyDuration, IggyError, IggyExpiry, IggyMessage, MaxTopicSize, MessageClient,
+    IggyClient, IggyDuration, IggyError, IggyExpiry, IggyMessage, IggyProducer, MaxTopicSize,
     Partitioning, StreamClient, SystemClient, TopicClient, UserClient,
 };
 use sockudo_core::error::{Error, Result};
 use sockudo_core::options::IggyConfig;
 use sockudo_core::queue::QueueInterface;
 use sockudo_core::webhook_types::{JobData, JobProcessorFnAsync};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
-use tokio::sync::Notify;
-use tokio::time::timeout;
+use tokio::sync::{Mutex, Notify};
+use tokio::time::{sleep, timeout};
 use tracing::{error, info, warn};
 
 const IGGY_QUEUE_ATTEMPT_HEADER: &str = "sockudo-delivery-attempt";
 const IGGY_QUEUE_MAX_DELIVERY_ATTEMPTS: u32 = 5;
 
+struct QueuePublisher<'a> {
+    producers: &'a Arc<Mutex<HashMap<String, Arc<IggyProducer>>>>,
+    client: &'a IggyClient,
+    config: &'a IggyConfig,
+    stream: &'a str,
+}
+
 pub struct IggyQueueManager {
     client: Arc<IggyClient>,
     config: IggyConfig,
     stream: String,
+    producers: Arc<Mutex<HashMap<String, Arc<IggyProducer>>>>,
     shutdown: Arc<Notify>,
     running: Arc<AtomicBool>,
 }
@@ -39,6 +48,7 @@ impl IggyQueueManager {
             client,
             config,
             stream,
+            producers: Arc::new(Mutex::new(HashMap::new())),
             shutdown: Arc::new(Notify::new()),
             running: Arc::new(AtomicBool::new(true)),
         })
@@ -70,13 +80,13 @@ impl QueueInterface for IggyQueueManager {
         let payload = sonic_rs::to_vec(&data)
             .map_err(|e| Error::Queue(format!("Failed to serialize Apache Iggy queue job: {e}")))?;
         publish_queue_payload(
+            &self.producers,
             &self.client,
             &self.config,
             &self.stream,
             &topic,
             Bytes::from(payload),
             1,
-            true,
         )
         .await?;
 
@@ -85,111 +95,125 @@ impl QueueInterface for IggyQueueManager {
 
     async fn process_queue(&self, queue_name: &str, callback: JobProcessorFnAsync) -> Result<()> {
         let topic = self.topic_name(queue_name);
+        let dlq_topic = format!("{topic}-dlq");
         let group = self.group_name(queue_name);
         ensure_topic(&self.client, &self.config, &self.stream, &topic).await?;
+        ensure_topic(&self.client, &self.config, &self.stream, &dlq_topic).await?;
         ensure_consumer_group(&self.client, &self.config, &self.stream, &topic, &group).await?;
 
         let callback: ArcJobProcessorFn = Arc::from(callback);
         let config = self.config.clone();
         let stream = self.stream.clone();
+        let producers = self.producers.clone();
         let shutdown = self.shutdown.clone();
         let running = self.running.clone();
 
         tokio::spawn(async move {
-            let client = match connect_client(&config).await {
-                Ok(client) => Arc::new(client),
-                Err(error) => {
-                    error!("Failed to start Apache Iggy queue worker: {}", error);
-                    return;
-                }
-            };
+            let mut retry_attempt = 0;
+            while running.load(Ordering::Relaxed) {
+                let client = match connect_client(&config).await {
+                    Ok(client) => Arc::new(client),
+                    Err(error) => {
+                        warn!("Failed to connect Apache Iggy queue worker: {error}; retrying");
+                        retry_attempt += 1;
+                        wait_before_retry(&config, retry_attempt, &shutdown, &running).await;
+                        continue;
+                    }
+                };
 
-            let consumer = match client
-                .consumer_group(&group, &stream, &topic)
-                .map_err(to_queue_error)
-            {
-                Ok(builder) => builder
-                    .poll_interval(IggyDuration::from(Duration::from_millis(
-                        config.poll_interval_ms,
-                    )))
-                    .batch_length(config.poll_batch_size)
-                    .auto_commit(AutoCommit::Disabled)
-                    .build(),
-                Err(error) => {
-                    error!("Invalid Apache Iggy queue consumer config: {error}");
-                    let _ = client.shutdown().await;
-                    return;
-                }
-            };
-            let mut consumer = consumer;
-            if let Err(error) = with_timeout(&config, consumer.init()).await {
-                error!("Failed to initialize Apache Iggy queue consumer group '{group}': {error}");
-                let _ = client.shutdown().await;
-                return;
-            }
+                let mut consumer = match build_queue_consumer(
+                    &client, &config, &stream, &topic, &group,
+                )
+                .await
+                {
+                    Ok(consumer) => {
+                        retry_attempt = 0;
+                        consumer
+                    }
+                    Err(error) => {
+                        warn!(
+                            "Failed to initialize Apache Iggy queue consumer group '{group}': {error}; retrying"
+                        );
+                        if let Err(error) = client.shutdown().await {
+                            warn!("Failed to shutdown Apache Iggy queue worker client: {error}");
+                        }
+                        retry_attempt += 1;
+                        wait_before_retry(&config, retry_attempt, &shutdown, &running).await;
+                        continue;
+                    }
+                };
 
-            loop {
-                if !running.load(Ordering::Relaxed) {
-                    break;
-                }
-                tokio::select! {
-                    _ = shutdown.notified() => break,
-                    received = consumer.next() => {
-                        match received {
-                            Some(Ok(received)) => {
-                                let partition_id = received.partition_id;
-                                let message = received.message;
-                                match sonic_rs::from_slice::<JobData>(&message.payload) {
-                                    Ok(job) => {
-                                        if callback(job).await.is_ok() {
+                loop {
+                    if !running.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    tokio::select! {
+                        _ = shutdown.notified() => break,
+                        received = consumer.next() => {
+                            match received {
+                                Some(Ok(received)) => {
+                                    let partition_id = received.partition_id;
+                                    let message = received.message;
+                                    match sonic_rs::from_slice::<JobData>(&message.payload) {
+                                        Ok(job) => {
+                                            if callback(job).await.is_ok() {
+                                                if let Err(error) = consumer
+                                                    .store_offset(message.header.offset, Some(partition_id))
+                                                    .await
+                                                {
+                                                    error!(
+                                                        "Failed to commit Apache Iggy queue offset: {error}"
+                                                    );
+                                                }
+                                            } else if let Err(error) = handle_failed_job(
+                                                &QueuePublisher {
+                                                    producers: &producers,
+                                                    client: &client,
+                                                    config: &config,
+                                                    stream: &stream,
+                                                },
+                                                &topic,
+                                                &message,
+                                                &mut consumer,
+                                                partition_id,
+                                            )
+                                            .await
+                                            {
+                                                warn!(
+                                                    "Apache Iggy queue job failed and could not be moved for retry/DLQ: {error}"
+                                                );
+                                            }
+                                        }
+                                        Err(error) => {
+                                            error!("Failed to deserialize Apache Iggy queue job: {error}");
                                             if let Err(error) = consumer
                                                 .store_offset(message.header.offset, Some(partition_id))
                                                 .await
                                             {
                                                 error!(
-                                                    "Failed to commit Apache Iggy queue offset: {error}"
+                                                    "Failed to commit malformed Apache Iggy queue job: {error}"
                                                 );
                                             }
-                                        } else if let Err(error) = handle_failed_job(
-                                            &client,
-                                            &config,
-                                            &stream,
-                                            &topic,
-                                            &message,
-                                            &mut consumer,
-                                            partition_id,
-                                        )
-                                        .await
-                                        {
-                                            warn!(
-                                                "Apache Iggy queue job failed and could not be moved for retry/DLQ: {error}"
-                                            );
-                                        }
-                                    }
-                                    Err(error) => {
-                                        error!("Failed to deserialize Apache Iggy queue job: {error}");
-                                        if let Err(error) = consumer
-                                            .store_offset(message.header.offset, Some(partition_id))
-                                            .await
-                                        {
-                                            error!(
-                                                "Failed to commit malformed Apache Iggy queue job: {error}"
-                                            );
                                         }
                                     }
                                 }
+                                Some(Err(error)) => warn!("Apache Iggy queue consumer failed: {error}"),
+                                None => break,
                             }
-                            Some(Err(error)) => warn!("Apache Iggy queue consumer failed: {error}"),
-                            None => break,
                         }
                     }
                 }
-            }
-            if let Err(error) = consumer.shutdown().await {
-                warn!("Failed to shutdown Apache Iggy queue consumer: {error}");
-            }
-            if let Err(error) = client.shutdown().await {
-                warn!("Failed to shutdown Apache Iggy queue worker client: {error}");
+                if let Err(error) = consumer.shutdown().await {
+                    warn!("Failed to shutdown Apache Iggy queue consumer: {error}");
+                }
+                if let Err(error) = client.shutdown().await {
+                    warn!("Failed to shutdown Apache Iggy queue worker client: {error}");
+                }
+                if running.load(Ordering::Relaxed) {
+                    retry_attempt += 1;
+                    warn!("Apache Iggy queue worker ended unexpectedly; retrying");
+                    wait_before_retry(&config, retry_attempt, &shutdown, &running).await;
+                }
             }
             info!("Apache Iggy queue worker stopped");
         });
@@ -240,6 +264,26 @@ async fn connect_client(config: &IggyConfig) -> Result<IggyClient> {
     }
 
     Ok(client)
+}
+
+async fn build_queue_consumer(
+    client: &IggyClient,
+    config: &IggyConfig,
+    stream: &str,
+    topic: &str,
+    group: &str,
+) -> Result<iggy::prelude::IggyConsumer> {
+    let mut consumer = client
+        .consumer_group(group, stream, topic)
+        .map_err(to_queue_error)?
+        .poll_interval(IggyDuration::from(Duration::from_millis(
+            config.poll_interval_ms,
+        )))
+        .batch_length(config.poll_batch_size)
+        .auto_commit(AutoCommit::Disabled)
+        .build();
+    with_timeout(config, consumer.init()).await?;
+    Ok(consumer)
 }
 
 async fn ensure_stream(client: &IggyClient, config: &IggyConfig, stream: &str) -> Result<()> {
@@ -335,13 +379,13 @@ async fn ensure_consumer_group(
 }
 
 async fn publish_queue_payload(
+    producers: &Arc<Mutex<HashMap<String, Arc<IggyProducer>>>>,
     client: &IggyClient,
     config: &IggyConfig,
     stream: &str,
     topic: &str,
     payload: Bytes,
     attempt: u32,
-    flush_after_write: bool,
 ) -> Result<()> {
     let mut headers = std::collections::BTreeMap::new();
     headers.insert(
@@ -354,17 +398,29 @@ async fn publish_queue_payload(
         .build()
         .map_err(to_queue_error)?;
 
-    let producer = build_queue_producer(client, config, stream, topic).await?;
+    let producer = cached_queue_producer(producers, client, config, stream, topic).await?;
     with_timeout(config, producer.send_one(message))
         .await
         .map_err(|e| Error::Queue(format!("Failed to publish Apache Iggy queue job: {e}")))?;
-    producer.shutdown().await;
-
-    if flush_after_write {
-        flush_topic_partitions(client, config, stream, topic).await?;
-    }
 
     Ok(())
+}
+
+async fn cached_queue_producer(
+    producers: &Arc<Mutex<HashMap<String, Arc<IggyProducer>>>>,
+    client: &IggyClient,
+    config: &IggyConfig,
+    stream: &str,
+    topic: &str,
+) -> Result<Arc<IggyProducer>> {
+    let mut producers = producers.lock().await;
+    if let Some(producer) = producers.get(topic) {
+        return Ok(producer.clone());
+    }
+
+    let producer = Arc::new(build_queue_producer(client, config, stream, topic).await?);
+    producers.insert(topic.to_string(), producer.clone());
+    Ok(producer)
 }
 
 async fn build_queue_producer(
@@ -396,28 +452,8 @@ async fn build_queue_producer(
     Ok(producer)
 }
 
-async fn flush_topic_partitions(
-    client: &IggyClient,
-    config: &IggyConfig,
-    stream: &str,
-    topic: &str,
-) -> Result<()> {
-    let stream_id = identifier(stream)?;
-    let topic_id = identifier(topic)?;
-    for partition_id in 0..config.partitions_count {
-        with_timeout(
-            config,
-            client.flush_unsaved_buffer(&stream_id, &topic_id, partition_id, true),
-        )
-        .await?;
-    }
-    Ok(())
-}
-
 async fn handle_failed_job(
-    client: &IggyClient,
-    config: &IggyConfig,
-    stream: &str,
+    publisher: &QueuePublisher<'_>,
     topic: &str,
     message: &IggyMessage,
     consumer: &mut iggy::prelude::IggyConsumer,
@@ -437,13 +473,13 @@ async fn handle_failed_job(
     };
 
     publish_queue_payload(
-        client,
-        config,
-        stream,
+        publisher.producers,
+        publisher.client,
+        publisher.config,
+        publisher.stream,
         &retry_topic,
         message.payload.clone(),
         next_attempt,
-        true,
     )
     .await?;
     consumer
@@ -491,6 +527,34 @@ where
             ))
         })?
         .map_err(to_queue_error)
+}
+
+async fn wait_before_retry(
+    config: &IggyConfig,
+    attempt: u32,
+    shutdown: &Notify,
+    running: &AtomicBool,
+) {
+    if !running.load(Ordering::Relaxed) {
+        return;
+    }
+    let multiplier = 1_u64 << attempt.min(5);
+    let delay_ms = config
+        .poll_interval_ms
+        .max(100)
+        .saturating_mul(multiplier)
+        .min(30_000);
+    tokio::select! {
+        _ = shutdown.notified() => {}
+        _ = sleep(Duration::from_millis(delay_ms)) => {}
+    }
+}
+
+impl Drop for IggyQueueManager {
+    fn drop(&mut self) {
+        self.running.store(false, Ordering::Relaxed);
+        self.shutdown.notify_waiters();
+    }
 }
 
 fn identifier(value: &str) -> Result<iggy::prelude::Identifier> {
