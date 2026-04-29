@@ -8,9 +8,11 @@ use sockudo_adapter::handler::types::SubscriptionRequest;
 use sockudo_adapter::local_adapter::LocalAdapter;
 use sockudo_app::memory_app_manager::MemoryAppManager;
 use sockudo_core::annotations::{
-    Annotation, AnnotationAction, AnnotationId, AnnotationProjection, AnnotationProjectionOptions,
-    AnnotationProjectionRequest, AnnotationSerial, AnnotationSummary, AnnotationType,
-    IdentifiedAnnotationSummary, MemoryAnnotationStore, MultipleAnnotationSummary,
+    Annotation, AnnotationAction, AnnotationEventLookupRequest, AnnotationEventsRequest,
+    AnnotationId, AnnotationProjection, AnnotationProjectionOptions, AnnotationProjectionRequest,
+    AnnotationProjectionsForChannelRequest, AnnotationSerial, AnnotationStore, AnnotationSummary,
+    AnnotationType, IdentifiedAnnotationSummary, MemoryAnnotationStore, MultipleAnnotationSummary,
+    RawAnnotationReplayRequest, StoredAnnotationEvent, StoredAnnotationProjection,
 };
 use sockudo_core::app::{App, AppChannelsPolicy, AppManager, AppPolicy};
 use sockudo_core::history::{HistoryStore, MemoryHistoryStore, MemoryHistoryStoreConfig, now_ms};
@@ -45,6 +47,90 @@ struct AnnotationHarness {
     app: App,
     app_manager: Arc<MemoryAppManager>,
     adapter: Arc<LocalAdapter>,
+    metrics: Arc<MockMetricsInterface>,
+}
+
+struct RebuildReportingAnnotationStore {
+    inner: Arc<MemoryAnnotationStore>,
+    rebuild_count: usize,
+}
+
+#[async_trait::async_trait]
+impl AnnotationStore for RebuildReportingAnnotationStore {
+    async fn append_event(
+        &self,
+        event: StoredAnnotationEvent,
+    ) -> sockudo_core::error::Result<StoredAnnotationProjection> {
+        self.inner.append_event(event).await
+    }
+
+    async fn get_events(
+        &self,
+        request: AnnotationEventsRequest,
+    ) -> sockudo_core::error::Result<Vec<StoredAnnotationEvent>> {
+        self.inner.get_events(request).await
+    }
+
+    async fn replay_raw(
+        &self,
+        request: RawAnnotationReplayRequest,
+    ) -> sockudo_core::error::Result<Vec<StoredAnnotationEvent>> {
+        self.inner.replay_raw(request).await
+    }
+
+    async fn get_event_by_serial(
+        &self,
+        request: AnnotationEventLookupRequest,
+    ) -> sockudo_core::error::Result<Option<StoredAnnotationEvent>> {
+        self.inner.get_event_by_serial(request).await
+    }
+
+    async fn get_projection(
+        &self,
+        request: AnnotationProjectionRequest,
+    ) -> sockudo_core::error::Result<Option<StoredAnnotationProjection>> {
+        self.inner.get_projection(request).await
+    }
+
+    async fn list_projections_for_channel(
+        &self,
+        request: AnnotationProjectionsForChannelRequest,
+    ) -> sockudo_core::error::Result<Vec<StoredAnnotationProjection>> {
+        self.inner.list_projections_for_channel(request).await
+    }
+
+    async fn list_projections_for_channel_with_rebuild_count(
+        &self,
+        request: AnnotationProjectionsForChannelRequest,
+    ) -> sockudo_core::error::Result<(Vec<StoredAnnotationProjection>, usize)> {
+        let projections = self.inner.list_projections_for_channel(request).await?;
+        Ok((projections, self.rebuild_count))
+    }
+
+    async fn rebuild_projection(
+        &self,
+        request: AnnotationProjectionRequest,
+    ) -> sockudo_core::error::Result<StoredAnnotationProjection> {
+        self.inner.rebuild_projection(request).await
+    }
+
+    async fn rebuild_projection_with_options(
+        &self,
+        request: AnnotationProjectionRequest,
+        options: AnnotationProjectionOptions,
+    ) -> sockudo_core::error::Result<StoredAnnotationProjection> {
+        self.inner
+            .rebuild_projection_with_options(request, options)
+            .await
+    }
+
+    async fn purge_before(
+        &self,
+        before_ms: i64,
+        batch_size: usize,
+    ) -> sockudo_core::error::Result<(u64, bool)> {
+        self.inner.purge_before(before_ms, batch_size).await
+    }
 }
 
 fn annotation_type(value: &str) -> AnnotationType {
@@ -142,7 +228,7 @@ fn versioned_record() -> StoredVersionRecord {
 
 async fn build_harness_with_shared_stores(
     version_store: Arc<MemoryVersionStore>,
-    annotation_store: Arc<MemoryAnnotationStore>,
+    annotation_store: Arc<dyn AnnotationStore + Send + Sync>,
 ) -> AnnotationHarness {
     let app_manager = Arc::new(MemoryAppManager::new());
     let app = App::from_policy(
@@ -166,6 +252,7 @@ async fn build_harness_with_shared_stores(
     options.history.enabled = true;
     options.annotations.enabled = true;
 
+    let metrics = Arc::new(MockMetricsInterface::new());
     let handler = ConnectionHandler::builder(
         app_manager.clone() as Arc<dyn AppManager + Send + Sync>,
         adapter.clone() as Arc<dyn ConnectionManager + Send + Sync>,
@@ -179,7 +266,7 @@ async fn build_harness_with_shared_stores(
         Arc::new(MemoryHistoryStore::new(MemoryHistoryStoreConfig::default()))
             as Arc<dyn HistoryStore + Send + Sync>,
     )
-    .metrics(Arc::new(MockMetricsInterface::new()))
+    .metrics(metrics.clone())
     .build();
 
     AnnotationHarness {
@@ -187,6 +274,7 @@ async fn build_harness_with_shared_stores(
         app,
         app_manager,
         adapter,
+        metrics,
     }
 }
 
@@ -796,6 +884,48 @@ async fn reconnect_subscription_receives_coherent_summary_snapshot() {
 }
 
 #[tokio::test]
+async fn reconnect_subscription_marks_projection_rebuild_metrics_on_cache_miss() {
+    let version_store = Arc::new(MemoryVersionStore::new());
+    version_store
+        .append_version(versioned_record())
+        .await
+        .unwrap();
+    let inner_store = Arc::new(MemoryAnnotationStore::new());
+    inner_store
+        .append_event(StoredAnnotationEvent {
+            app_id: APP_ID.to_string(),
+            channel_id: CHANNEL.to_string(),
+            stored_at_ms: now_ms(),
+            annotation: event(
+                "ann:1",
+                "reactions:distinct.v1",
+                AnnotationAction::Create,
+                Some("like"),
+                Some("client-1"),
+                None,
+            ),
+        })
+        .await
+        .unwrap();
+    let annotation_store = Arc::new(RebuildReportingAnnotationStore {
+        inner: inner_store,
+        rebuild_count: 1,
+    });
+    let harness = build_harness_with_shared_stores(version_store, annotation_store).await;
+
+    let (socket_id, mut reader) = connect_v2_socket(&harness).await;
+    subscribe(&harness, &socket_id, &mut reader, false).await;
+
+    let snapshot = recv_event(&mut reader, MESSAGE_SUMMARY_EVENT_NAME).await;
+    assert_eq!(
+        summary_payload(&snapshot)["reactions:distinct.v1"]["like"]["total"].as_u64(),
+        Some(1)
+    );
+    assert_eq!(harness.metrics.annotation_projection_rebuilds(), 1);
+    assert_eq!(harness.metrics.annotation_projection_rebuild_durations(), 1);
+}
+
+#[tokio::test]
 async fn shared_annotation_store_converges_under_two_node_concurrent_publishes() {
     let version_store = Arc::new(MemoryVersionStore::new());
     version_store
@@ -855,4 +985,75 @@ async fn shared_annotation_store_converges_under_two_node_concurrent_publishes()
         names["like"].client_ids,
         vec!["client-a".to_string(), "client-b".to_string()]
     );
+}
+
+#[tokio::test]
+async fn shared_annotation_store_converges_after_node_failover_delete_and_replay() {
+    let version_store = Arc::new(MemoryVersionStore::new());
+    version_store
+        .append_version(versioned_record())
+        .await
+        .unwrap();
+    let annotation_store = Arc::new(MemoryAnnotationStore::new());
+    let node_a =
+        build_harness_with_shared_stores(version_store.clone(), annotation_store.clone()).await;
+    let node_b = build_harness_with_shared_stores(version_store, annotation_store.clone()).await;
+
+    let result_a = publish_annotation(
+        &node_a,
+        "reactions:distinct.v1",
+        Some("like"),
+        Some("client-a"),
+        None,
+    )
+    .await;
+    publish_annotation(
+        &node_b,
+        "reactions:distinct.v1",
+        Some("like"),
+        Some("client-b"),
+        None,
+    )
+    .await;
+
+    let replayed = annotation_store
+        .get_event_by_serial(AnnotationEventLookupRequest {
+            app_id: APP_ID.to_string(),
+            channel_id: CHANNEL.to_string(),
+            annotation_serial: result_a.annotation_serial.clone(),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    annotation_store.append_event(replayed).await.unwrap();
+
+    delete_annotation(&node_b, result_a.annotation_serial).await;
+
+    let request = AnnotationProjectionRequest {
+        app_id: APP_ID.to_string(),
+        channel_id: CHANNEL.to_string(),
+        message_serial: message_serial(),
+        annotation_type: annotation_type("reactions:distinct.v1"),
+    };
+    let projection_a = node_a
+        .handler
+        .annotation_store()
+        .get_projection(request.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    let projection_b = node_b
+        .handler
+        .annotation_store()
+        .get_projection(request)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(projection_a.summary, projection_b.summary);
+    let AnnotationSummary::Distinct(names) = projection_a.summary else {
+        panic!("expected distinct summary");
+    };
+    assert_eq!(names["like"].total, 1);
+    assert_eq!(names["like"].client_ids, vec!["client-b".to_string()]);
 }

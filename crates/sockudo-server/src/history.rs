@@ -11,12 +11,12 @@ use sockudo_core::history::{
 };
 use sockudo_core::history::{HistoryStore, MemoryHistoryStore, MemoryHistoryStoreConfig};
 use sockudo_core::metrics::MetricsInterface;
-#[cfg(any(feature = "postgres", feature = "mysql"))]
+#[cfg(feature = "postgres")]
 use sockudo_core::options::DatabaseConnection;
 use sockudo_core::options::{DatabaseConfig, DatabasePooling, HistoryBackend, HistoryConfig};
 #[cfg(feature = "versioned-messages")]
 use sockudo_core::options::{VersionStoreDriver, VersionedMessagesConfig};
-#[cfg(feature = "postgres")]
+#[cfg(all(feature = "postgres", feature = "versioned-messages"))]
 use sockudo_core::version_store::{
     StoredVersionRecord, VersionReplayRequest, VersionStore, VersionStoreCursor,
     VersionStoreDirection, VersionStorePage, VersionStoreReadRequest, VersionStreamState,
@@ -1628,8 +1628,8 @@ impl HistoryStore for PostgresHistoryStore {
         }
         let sql = format!(
             r#"
-            DELETE FROM {table} WHERE id IN (
-                SELECT id FROM {table} WHERE published_at_ms < $1 ORDER BY published_at_ms ASC LIMIT $2
+            DELETE FROM {table} WHERE ctid IN (
+                SELECT ctid FROM {table} WHERE published_at_ms < $1 ORDER BY published_at_ms ASC LIMIT $2
             )
             "#,
             table = self.tables.entries

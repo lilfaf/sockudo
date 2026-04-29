@@ -23,6 +23,7 @@ use sockudo_protocol::messages::{
 use sonic_rs::Value;
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
+use std::time::Instant;
 
 #[derive(Debug, Clone)]
 pub struct SubscriptionResult {
@@ -748,13 +749,27 @@ impl ConnectionHandler {
             return Ok(());
         }
 
-        let projections = self
+        let rebuild_started = Instant::now();
+        let (projections, rebuild_count) = self
             .annotation_store()
-            .list_projections_for_channel(AnnotationProjectionsForChannelRequest {
-                app_id: app_config.id.clone(),
-                channel_id: channel.to_string(),
-            })
+            .list_projections_for_channel_with_rebuild_count(
+                AnnotationProjectionsForChannelRequest {
+                    app_id: app_config.id.clone(),
+                    channel_id: channel.to_string(),
+                },
+            )
             .await?;
+        if rebuild_count > 0
+            && let Some(metrics) = self.metrics()
+        {
+            for _ in 0..rebuild_count {
+                metrics.mark_annotation_projection_rebuild(channel);
+            }
+            metrics.track_annotation_projection_rebuild_duration(
+                channel,
+                rebuild_started.elapsed().as_secs_f64(),
+            );
+        }
 
         for projection in projections {
             if let Some(contributor_count) = clipped_contributor_count(&projection.summary) {

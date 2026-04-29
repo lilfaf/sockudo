@@ -476,6 +476,14 @@ pub trait AnnotationStore: Send + Sync {
         Ok(Vec::new())
     }
 
+    async fn list_projections_for_channel_with_rebuild_count(
+        &self,
+        request: AnnotationProjectionsForChannelRequest,
+    ) -> Result<(Vec<StoredAnnotationProjection>, usize)> {
+        let projections = self.list_projections_for_channel(request).await?;
+        Ok((projections, 0))
+    }
+
     async fn rebuild_projection(
         &self,
         request: AnnotationProjectionRequest,
@@ -830,6 +838,16 @@ impl AnnotationStore for MemoryAnnotationStore {
         &self,
         request: AnnotationProjectionsForChannelRequest,
     ) -> Result<Vec<StoredAnnotationProjection>> {
+        let (projections, _) = self
+            .list_projections_for_channel_with_rebuild_count(request)
+            .await?;
+        Ok(projections)
+    }
+
+    async fn list_projections_for_channel_with_rebuild_count(
+        &self,
+        request: AnnotationProjectionsForChannelRequest,
+    ) -> Result<(Vec<StoredAnnotationProjection>, usize)> {
         request.validate()?;
         let requests = {
             let state = self.state.read().await;
@@ -866,8 +884,25 @@ impl AnnotationStore for MemoryAnnotationStore {
         };
 
         let mut projections = Vec::new();
+        let mut rebuild_count = 0;
         for projection_request in requests {
+            let should_rebuild = {
+                let state = self.state.read().await;
+                let key = Self::request_projection_key(&projection_request);
+                let projection = state.projections.get(&key);
+                let max_serial = Self::projection_max_serial(&state, &key);
+                match (projection, max_serial) {
+                    (None, Some(_)) => true,
+                    (Some(projection), max_serial) => {
+                        projection.last_annotation_serial != max_serial
+                    }
+                    _ => false,
+                }
+            };
             if let Some(projection) = self.get_projection(projection_request).await? {
+                if should_rebuild {
+                    rebuild_count += 1;
+                }
                 projections.push(projection);
             }
         }
@@ -876,7 +911,7 @@ impl AnnotationStore for MemoryAnnotationStore {
                 .cmp(&right.message_serial)
                 .then_with(|| left.annotation_type.cmp(&right.annotation_type))
         });
-        Ok(projections)
+        Ok((projections, rebuild_count))
     }
 
     async fn rebuild_projection(
@@ -1855,6 +1890,49 @@ mod tests {
             projections[0].summary,
             AnnotationSummary::Total(TotalAnnotationSummary { total: 1 })
         );
+    }
+
+    #[tokio::test]
+    async fn memory_store_reports_cold_projection_cache_rebuild_count() {
+        let store = MemoryAnnotationStore::new();
+        let event = stored_event(
+            "ann:1",
+            "reaction:total.v1",
+            AnnotationAction::Create,
+            None,
+            None,
+            None,
+            1,
+        );
+        let projection_key = MemoryAnnotationStore::event_projection_key(&event);
+        let channel_key = MemoryAnnotationStore::channel_key(&event.app_id, &event.channel_id);
+        {
+            let mut state = store.state.write().await;
+            state
+                .events_by_projection
+                .entry(projection_key)
+                .or_default()
+                .insert(event.annotation_serial().clone(), event.clone());
+            state
+                .raw_by_channel
+                .entry(channel_key)
+                .or_default()
+                .insert(event.annotation_serial().clone(), event);
+            state.projections.clear();
+        }
+
+        let (projections, rebuild_count) = store
+            .list_projections_for_channel_with_rebuild_count(
+                AnnotationProjectionsForChannelRequest {
+                    app_id: "app".to_string(),
+                    channel_id: "chat".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(projections.len(), 1);
+        assert_eq!(rebuild_count, 1);
     }
 
     #[tokio::test]
