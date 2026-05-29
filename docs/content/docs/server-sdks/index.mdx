@@ -1,0 +1,54 @@
+---
+title: Server SDKs
+description: Use official Sockudo HTTP SDKs to publish, authenticate, inspect state, validate webhooks, manage history, and operate push notifications.
+icon: Blocks
+---
+
+Server SDKs are trusted backend libraries. They hold app secrets, sign HTTP requests, sign private and presence channel auth responses, validate webhooks, publish realtime events, and manage push notifications.
+
+## Official SDKs
+
+| Language | Package | Guide |
+| --- | --- | --- |
+| Node.js | `sockudo` | [Node.js](/docs/server-sdks/node) |
+| Python | `sockudo-http-python` | [Python](/docs/server-sdks/python) |
+| PHP | `sockudo/sockudo-php-server` | [PHP](/docs/server-sdks/php) |
+| Ruby | `sockudo` | [Ruby](/docs/server-sdks/ruby) |
+| Go | `github.com/sockudo/sockudo-http-go/v5` | [Go](/docs/server-sdks/go) |
+| Rust | `sockudo-http` | [Rust](/docs/server-sdks/rust) |
+| Java | `io.sockudo:sockudo-http-java` | [Java](/docs/server-sdks/java) |
+| .NET | `SockudoServer` | [.NET](/docs/server-sdks/dotnet) |
+| Swift | `Sockudo` | [Swift](/docs/server-sdks/swift) |
+
+## What belongs on the server
+
+- event publishing and batch publishing
+- idempotency keys for safe retries
+- private, presence, encrypted, and user authentication
+- webhook signature validation
+- history, versioned messages, annotations, and presence history reads
+- push device registration, channel push subscriptions, provider credentials, publish, scheduling, status, and delivery callbacks
+
+## Push as a backend concern
+
+Client apps may collect device tokens, but server SDKs should register devices and publish push notifications. This keeps app secrets and provider credentials away from browsers and mobile apps.
+
+```ts
+await sockudo.publishPush({
+  recipients: [{ type: "channel", channel: "orders" }],
+  payload: {
+    title: "Order updated",
+    body: "Order ord_123 is packed",
+  },
+  idempotency_key: "push-order-ord_123-packed",
+});
+```
+
+## Shared production pattern
+
+1. Instantiate one SDK client per process and reuse it.
+2. Use environment variables or secret managers for app credentials.
+3. Add `idempotency_key` to retryable publish and push workflows.
+4. Validate private and presence channel access before signing.
+5. Validate webhook signatures before parsing business logic.
+6. Treat push publish responses as admission records and inspect status asynchronously.

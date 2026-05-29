@@ -1,0 +1,92 @@
+---
+title: Rust
+description: Use the Rust HTTP SDK to publish events, sign auth responses, manage history, annotations, and push.
+icon: FileCode
+---
+
+## Install
+
+```toml
+[dependencies]
+sockudo-http = "1"
+tokio = { version = "1", features = ["full"] }
+serde_json = "1"
+```
+
+## Configure
+
+```rust
+use sockudo_http::{Config, Pusher};
+
+let config = Config::builder()
+    .app_id("app-id")
+    .key("app-key")
+    .secret("app-secret")
+    .host("127.0.0.1")
+    .port(6001)
+    .use_tls(false)
+    .build()?;
+
+let sockudo = Pusher::new(config)?;
+```
+
+## Publish
+
+```rust
+use sockudo_http::{events::TriggerParams, Channel};
+use serde_json::json;
+
+let channels = vec![Channel::from_string("orders")?];
+let params = TriggerParams::builder()
+    .idempotency_key("order-created-ord_123")
+    .build();
+
+sockudo
+    .trigger(&channels, "order.created", json!({ "id": "ord_123" }), Some(params))
+    .await?;
+```
+
+## Batch and tags
+
+```rust
+use sockudo_http::events::BatchEvent;
+use std::collections::HashMap;
+
+let mut tags = HashMap::new();
+tags.insert("tenant".to_string(), "acme".to_string());
+
+let event = BatchEvent::new("order.created", "orders", json!({ "id": "ord_124" }))
+    .with_tags(tags);
+
+sockudo.trigger_batch(vec![event]).await?;
+```
+
+## Push notifications
+
+```rust
+use serde_json::json;
+
+sockudo.activate_device(&json!({
+    "deviceId": "ios-device-1",
+    "clientId": "user-42",
+    "platform": "apns",
+    "providerToken": "provider-token"
+})).await?;
+
+sockudo.upsert_channel_push_subscription(&json!({
+    "deviceId": "ios-device-1",
+    "clientId": "user-42",
+    "channel": "orders"
+}), None).await?;
+
+let response = sockudo.publish_push(&json!({
+    "recipients": [{ "type": "channel", "channel": "orders" }],
+    "payload": {
+        "title": "Order updated",
+        "body": "Order ord_123 is packed"
+    },
+    "idempotency_key": "push-order-ord_123-packed"
+})).await?;
+```
+
+Use Rust SDK push helpers for backend services that already own transactional state and need typed error handling around notification fanout.

@@ -1,0 +1,101 @@
+---
+title: PHP
+description: Use the PHP server SDK for Laravel-compatible publishing, auth, state, history, and push notifications.
+icon: FileCode
+---
+
+## Install
+
+```bash
+composer require sockudo/sockudo-php-server
+```
+
+## Configure
+
+```php
+use Sockudo\Sockudo;
+
+$sockudo = new Sockudo([
+    'app_id' => 'app-id',
+    'key' => 'app-key',
+    'secret' => 'app-secret',
+    'host' => '127.0.0.1',
+    'port' => 6001,
+    'useTLS' => false,
+]);
+```
+
+## Publish
+
+```php
+$sockudo->trigger('orders', 'order.created', ['id' => 'ord_123'], [
+    'idempotency_key' => 'order-created-ord_123',
+]);
+
+$sockudo->triggerBatch([
+    ['channel' => 'orders', 'name' => 'order.created', 'data' => ['id' => 'ord_124']],
+    ['channel' => 'orders', 'name' => 'order.paid', 'data' => ['id' => 'ord_124']],
+]);
+```
+
+## Auth
+
+```php
+$private = $sockudo->authorizeChannel('private-orders', $socketId);
+
+$presence = $sockudo->authorizePresenceChannel(
+    'presence-lobby',
+    $socketId,
+    'user-42',
+    ['name' => 'Ada']
+);
+```
+
+## Laravel broadcasting
+
+```php
+'pusher' => [
+    'driver' => 'pusher',
+    'key' => env('SOCKUDO_APP_KEY'),
+    'secret' => env('SOCKUDO_APP_SECRET'),
+    'app_id' => env('SOCKUDO_APP_ID'),
+    'options' => [
+        'host' => env('SOCKUDO_HOST', '127.0.0.1'),
+        'port' => env('SOCKUDO_PORT', 6001),
+        'scheme' => 'http',
+        'useTLS' => false,
+    ],
+],
+```
+
+## Push notifications
+
+```php
+$sockudo->activateDevice([
+    'deviceId' => 'web-device-1',
+    'clientId' => 'user-42',
+    'platform' => 'webpush',
+    'providerToken' => $subscription,
+]);
+
+$sockudo->upsertChannelPushSubscription([
+    'deviceId' => 'web-device-1',
+    'clientId' => 'user-42',
+    'channel' => 'orders',
+]);
+
+$accepted = $sockudo->publishPush([
+    'recipients' => [
+        ['type' => 'channel', 'channel' => 'orders'],
+    ],
+    'payload' => [
+        'title' => 'Order updated',
+        'body' => 'Order ord_123 is packed',
+    ],
+    'idempotency_key' => 'push-order-ord_123-packed',
+]);
+
+$status = $sockudo->getPublishStatus($accepted->publish_id);
+```
+
+Push publishing is asynchronous by default. Use status APIs and provider callbacks for delivery diagnostics.

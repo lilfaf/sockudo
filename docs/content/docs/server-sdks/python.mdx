@@ -1,0 +1,120 @@
+---
+title: Python
+description: Use the Python sync or async SDK for publishing, auth, history, annotations, and push notifications.
+icon: FileCode
+---
+
+## Install
+
+```bash
+pip install sockudo-http-python
+```
+
+## Configure
+
+```python
+from sockudo_http_python import Sockudo, SockudoOptions
+
+sockudo = Sockudo(
+    "app-id",
+    "app-key",
+    "app-secret",
+    options=SockudoOptions(host="127.0.0.1", port=6001, use_tls=False),
+)
+```
+
+## Publish
+
+```python
+from sockudo_http_python import TriggerOptions
+
+sockudo.trigger(
+    "orders",
+    "order.created",
+    {"id": "ord_123"},
+    TriggerOptions(idempotency_key="order-created-ord_123"),
+)
+```
+
+## Async
+
+```python
+from sockudo_http_python import AsyncSockudo, SockudoOptions
+
+async with AsyncSockudo(
+    "app-id",
+    "app-key",
+    "app-secret",
+    options=SockudoOptions(host="127.0.0.1", port=6001, use_tls=False),
+) as sockudo:
+    await sockudo.trigger("orders", "order.created", {"id": "ord_123"})
+```
+
+## Auth
+
+```python
+from sockudo_http_python import PresenceUser
+
+private_body = sockudo.authenticate("123.456", "private-orders")
+
+presence_body = sockudo.authenticate(
+    "123.456",
+    "presence-lobby",
+    PresenceUser("user-42", {"name": "Ada"}),
+)
+
+user_body = sockudo.authenticate_user("123.456", {"id": "user-42"})
+```
+
+## History and annotations
+
+```python
+from sockudo_http_python import HistoryParams, MessageMutation, PublishAnnotationRequest
+
+sockudo.get_channel_history("orders", HistoryParams(limit=50, direction="newest_first"))
+sockudo.get_message("orders", "42")
+sockudo.update_message("orders", "42", MessageMutation(data={"status": "paid"}))
+sockudo.publish_annotation(
+    "orders",
+    "42",
+    PublishAnnotationRequest(
+        type="reactions:distinct.v1",
+        name="like",
+        client_id="user-42",
+        count=1,
+    ),
+)
+```
+
+## Push notifications
+
+```python
+from sockudo_http_python import PushSubscriptionParams
+
+sockudo.activate_device({
+    "deviceId": "android-device-1",
+    "clientId": "user-42",
+    "platform": "fcm",
+    "providerToken": "provider-token",
+})
+
+sockudo.upsert_channel_push_subscription({
+    "deviceId": "android-device-1",
+    "clientId": "user-42",
+    "channel": "orders",
+})
+
+accepted = sockudo.publish_push({
+    "recipients": [{"type": "channel", "channel": "orders"}],
+    "payload": {
+        "title": "Order updated",
+        "body": "Order ord_123 is packed",
+        "data": {"order_id": "ord_123"},
+    },
+    "idempotency_key": "push-order-ord_123-packed",
+})
+
+sockudo.list_channel_push_subscriptions(PushSubscriptionParams(device_id="android-device-1"))
+```
+
+Push helper methods force `sync = False` and return the API result for status inspection.

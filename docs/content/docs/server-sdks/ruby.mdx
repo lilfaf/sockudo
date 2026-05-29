@@ -1,0 +1,102 @@
+---
+title: Ruby
+description: Use the Ruby server SDK for Rails and Rack apps, including push notification workflows.
+icon: FileCode
+---
+
+## Install
+
+```ruby
+gem "sockudo"
+```
+
+```bash
+bundle install
+```
+
+## Configure
+
+```ruby
+require "sockudo"
+
+sockudo = Sockudo::Client.new(
+  app_id: "app-id",
+  key: "app-key",
+  secret: "app-secret",
+  host: "127.0.0.1",
+  port: 6001,
+  use_tls: false
+)
+```
+
+## Publish
+
+```ruby
+sockudo.trigger(
+  "orders",
+  "order.created",
+  { id: "ord_123" },
+  { idempotency_key: "order-created-ord_123" }
+)
+
+sockudo.trigger_batch([
+  { channel: "orders", name: "order.created", data: { id: "ord_124" } },
+  { channel: "orders", name: "order.paid", data: { id: "ord_124" } },
+])
+```
+
+## Auth
+
+```ruby
+private_auth = sockudo.authenticate("private-orders", params[:socket_id])
+
+presence_auth = sockudo.authenticate(
+  "presence-lobby",
+  params[:socket_id],
+  user_id: "user-42",
+  user_info: { name: "Ada" }
+)
+```
+
+## Webhooks
+
+```ruby
+webhook = sockudo.webhook(request)
+
+if webhook.valid?
+  webhook.events.each { |event| handle_event(event) }
+  head :ok
+else
+  head :unauthorized
+end
+```
+
+## Push notifications
+
+```ruby
+sockudo.activate_device(
+  deviceId: "ios-device-1",
+  clientId: "user-42",
+  platform: "apns",
+  providerToken: "provider-token"
+)
+
+sockudo.upsert_channel_push_subscription(
+  deviceId: "ios-device-1",
+  clientId: "user-42",
+  channel: "orders"
+)
+
+accepted = sockudo.publish_push(
+  recipients: [{ type: "channel", channel: "orders" }],
+  payload: {
+    title: "Order updated",
+    body: "Order ord_123 is packed"
+  },
+  idempotency_key: "push-order-ord_123-packed"
+)
+
+status = sockudo.get_publish_status(accepted[:publish_id])
+```
+
+Use Rails jobs for push fanout workflows that also touch your product database.

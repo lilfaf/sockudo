@@ -1,0 +1,101 @@
+---
+title: Swift
+description: Use the Swift HTTP server SDK to publish events, authenticate channels, validate state, and manage push.
+icon: FileCode
+---
+
+## Install
+
+```swift
+.package(url: "https://github.com/sockudo/sockudo-http-swift.git",
+         .upToNextMajor(from: "1.0.0"))
+```
+
+```swift
+.product(name: "Sockudo", package: "sockudo-http-swift")
+```
+
+## Configure
+
+```swift
+import Sockudo
+
+let sockudo = Sockudo(options: try SockudoClientOptions(
+    appId: 123456,
+    key: "app-key",
+    secret: "app-secret",
+    host: "127.0.0.1",
+    port: 6001
+))
+```
+
+## Publish
+
+```swift
+let event = try Event(
+    name: "order.created",
+    data: ["id": "ord_123"],
+    channel: Channel(name: "orders", type: .public),
+    idempotencyKey: "order-created-ord_123"
+)
+
+sockudo.trigger(event: event) { result in
+    switch result {
+    case .success(let summaries):
+        print(summaries)
+    case .failure(let error):
+        print(error)
+    }
+}
+```
+
+## Auth
+
+```swift
+let privateChannel = Channel(name: "orders", type: .private)
+
+sockudo.authenticate(channel: privateChannel, socketId: "123.456") { result in
+    print(result)
+}
+
+let userData = PresenceUserAuthData(userId: "user-42", userInfo: ["name": "Ada"])
+let presenceChannel = Channel(name: "lobby", type: .presence)
+
+sockudo.authenticate(channel: presenceChannel, socketId: "123.456", userData: userData) { result in
+    print(result)
+}
+```
+
+## Push notifications
+
+```swift
+sockudo.activateDevice(body: [
+    "deviceId": "ios-device-1",
+    "clientId": "user-42",
+    "platform": "apns",
+    "providerToken": "provider-token",
+]) { result in
+    print(result)
+}
+
+sockudo.upsertChannelPushSubscription(body: [
+    "deviceId": "ios-device-1",
+    "clientId": "user-42",
+    "channel": "orders",
+]) { result in
+    print(result)
+}
+
+sockudo.publishPush(request: [
+    "recipients": [["type": "channel", "channel": "orders"]],
+    "payload": [
+        "title": "Order updated",
+        "body": "Order ord_123 is packed",
+    ],
+    "idempotency_key": "push-order-ord_123-packed",
+]) { result in
+    print(result)
+}
+```
+
+Use Swift server SDKs in trusted services, not inside untrusted client apps with app secrets.

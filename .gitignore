@@ -10,7 +10,7 @@ benchmark/vendor
 .codanna/
 .fastembed_cache/
 client-sdks/
-server-sdks/
+/server-sdks/
 test/interactive/sockudo-js/
 /coolify/
 /sockudo-website/

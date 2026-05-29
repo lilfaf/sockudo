@@ -1,0 +1,104 @@
+---
+title: Go
+description: Use the Go server SDK for publishing, auth, state queries, and push notifications.
+icon: FileCode
+---
+
+## Install
+
+```bash
+go get github.com/sockudo/sockudo-http-go/v5
+```
+
+## Configure
+
+```go
+package main
+
+import sockudo "github.com/sockudo/sockudo-http-go/v5"
+
+var client = sockudo.Client{
+    AppID:  "app-id",
+    Key:    "app-key",
+    Secret: "app-secret",
+    Host:   "127.0.0.1",
+    Port:   "6001",
+    Secure: false,
+}
+```
+
+## Publish
+
+```go
+data := map[string]string{"id": "ord_123"}
+key := "order-created-ord_123"
+
+err := client.TriggerWithParams(
+    "orders",
+    "order.created",
+    data,
+    sockudo.TriggerParams{IdempotencyKey: &key},
+)
+if err != nil {
+    panic(err)
+}
+```
+
+## Auth endpoint
+
+```go
+func sockudoAuth(res http.ResponseWriter, req *http.Request) {
+    params, _ := io.ReadAll(req.Body)
+    response, err := client.AuthorizePrivateChannel(params)
+    if err != nil {
+        http.Error(res, "unauthorized", http.StatusUnauthorized)
+        return
+    }
+    fmt.Fprint(res, string(response))
+}
+```
+
+## Presence auth
+
+```go
+member := sockudo.MemberData{
+    UserID: "user-42",
+    UserInfo: map[string]string{
+        "name": "Ada",
+    },
+}
+
+response, err := client.AuthorizePresenceChannel(params, member)
+```
+
+## Push notifications
+
+```go
+_, err := client.ActivateDevice(sockudo.PushDeviceDetails{
+    "deviceId":      "android-device-1",
+    "clientId":      "user-42",
+    "platform":      "fcm",
+    "providerToken": "provider-token",
+})
+
+_, err = client.UpsertChannelPushSubscription(sockudo.PushChannelSubscription{
+    "deviceId": "android-device-1",
+    "clientId": "user-42",
+    "channel":  "orders",
+}, "")
+
+accepted, err := client.PublishPush(sockudo.PushPublishRequest{
+    "recipients": []sockudo.PushRecipient{
+        {"type": "channel", "channel": "orders"},
+    },
+    "payload": map[string]interface{}{
+        "title": "Order updated",
+        "body":  "Order ord_123 is packed",
+    },
+    "idempotency_key": "push-order-ord_123-packed",
+})
+
+_ = accepted
+```
+
+The Go push helpers sign `/push/*` requests and force async publish behavior.
