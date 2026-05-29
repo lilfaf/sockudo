@@ -1,0 +1,99 @@
+---
+title: .NET
+description: Use the .NET HTTP server SDK for publishing, auth, state queries, encrypted channels, and signed push requests.
+icon: FileCode
+---
+
+## Install
+
+```bash
+dotnet add package SockudoServer
+```
+
+```powershell
+Install-Package SockudoServer
+```
+
+## Configure
+
+```csharp
+using Sockudo;
+
+var options = new SockudoOptions
+{
+    Host = "127.0.0.1",
+    Port = 6001,
+    Encrypted = false,
+};
+
+var sockudo = new Sockudo(APP_ID, APP_KEY, APP_SECRET, options);
+```
+
+## Publish
+
+```csharp
+ITriggerResult result = await sockudo.TriggerAsync(
+    "orders",
+    "order.created",
+    new { id = "ord_123" },
+    new TriggerOptions
+    {
+        IdempotencyKey = "order-created-ord_123",
+    }
+).ConfigureAwait(false);
+```
+
+## Auth
+
+```csharp
+var privateAuth = sockudo.Authenticate("private-orders", socketId).ToJson();
+
+var channelData = new PresenceChannelData
+{
+    user_id = "user-42",
+    user_info = new { name = "Ada" },
+};
+
+var presenceAuth = sockudo.Authenticate("presence-lobby", socketId, channelData).ToJson();
+```
+
+## State
+
+```csharp
+var channel = await sockudo.FetchStateForChannelAsync<object>("orders")
+    .ConfigureAwait(false);
+
+var users = await sockudo.FetchUsersFromPresenceChannelAsync<object>("presence-lobby")
+    .ConfigureAwait(false);
+```
+
+## Signed push request
+
+If your .NET SDK version does not expose typed push helpers, generate a signed request for the push endpoint and send it with your preferred HTTP client.
+
+```csharp
+var requestBody = JsonSerializer.Serialize(new
+{
+    recipients = new[]
+    {
+        new { type = "channel", channel = "orders" },
+    },
+    payload = new
+    {
+        title = "Order updated",
+        body = "Order ord_123 is packed",
+    },
+    idempotency_key = "push-order-ord_123-packed",
+    sync = false,
+});
+
+var request = authenticatedRequestFactory.Build(
+    PusherMethod.POST,
+    "/push/publish",
+    requestBody: requestBody
+);
+
+request.Headers.Add("X-Sockudo-Push-Capability", "push-admin");
+```
+
+Prefer a first-class push helper when available in your SDK version; the signed request shape is the same.

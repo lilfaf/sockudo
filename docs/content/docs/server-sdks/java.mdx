@@ -1,0 +1,96 @@
+---
+title: Java
+description: Use the Java server SDK for synchronous or asynchronous publishing, auth, state queries, and push.
+icon: FileCode
+---
+
+## Install
+
+```xml
+<dependency>
+  <groupId>io.sockudo</groupId>
+  <artifactId>sockudo-http-java</artifactId>
+  <version>1.0.0</version>
+</dependency>
+```
+
+```kotlin
+implementation("io.sockudo:sockudo-http-java:1.0.0")
+```
+
+## Configure
+
+```java
+Sockudo sockudo = new Sockudo("app-id", "app-key", "app-secret");
+sockudo.setHost("127.0.0.1");
+sockudo.setPort(6001);
+sockudo.setEncrypted(false);
+```
+
+## Publish
+
+```java
+Map<String, Object> data = new HashMap<>();
+data.put("id", "ord_123");
+
+TriggerOptions options = new TriggerOptions();
+options.setIdempotencyKey("order-created-ord_123");
+
+sockudo.trigger("orders", "order.created", data, options);
+```
+
+## Auth
+
+```java
+String privateAuth = sockudo.authenticate(socketId, "private-orders");
+
+Map<String, String> userInfo = new HashMap<>();
+userInfo.put("name", "Ada");
+
+String presenceAuth = sockudo.authenticate(
+    socketId,
+    "presence-lobby",
+    new PresenceUser("user-42", userInfo)
+);
+```
+
+## Async
+
+```java
+SockudoAsync async = new SockudoAsync("app-id", "app-key", "app-secret");
+async.setHost("127.0.0.1");
+async.setPort(6001);
+
+CompletableFuture<Result> result =
+    async.trigger("orders", "order.created", Collections.singletonMap("id", "ord_123"));
+```
+
+## Push notifications
+
+```java
+Map<String, Object> device = new HashMap<>();
+device.put("deviceId", "android-device-1");
+device.put("clientId", "user-42");
+device.put("platform", "fcm");
+device.put("providerToken", "provider-token");
+sockudo.activateDevice(device);
+
+Map<String, Object> subscription = new HashMap<>();
+subscription.put("deviceId", "android-device-1");
+subscription.put("clientId", "user-42");
+subscription.put("channel", "orders");
+sockudo.upsertChannelPushSubscription(subscription);
+
+Map<String, Object> payload = new HashMap<>();
+payload.put("title", "Order updated");
+payload.put("body", "Order ord_123 is packed");
+
+Map<String, Object> request = new HashMap<>();
+request.put("recipients", List.of(Map.of("type", "channel", "channel", "orders")));
+request.put("payload", payload);
+request.put("idempotency_key", "push-order-ord_123-packed");
+
+sockudo.publishPush(request);
+```
+
+Push helpers set `sync` to `false` and include the required Sockudo push capability header.

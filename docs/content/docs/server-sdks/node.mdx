@@ -1,0 +1,100 @@
+---
+title: Node.js
+description: Publish events, sign auth responses, validate webhooks, read state, and manage push with the Node.js server SDK.
+icon: FileCode
+---
+
+## Install
+
+```bash
+npm install sockudo
+bun add sockudo
+```
+
+## Configure
+
+```ts
+import { Sockudo } from "sockudo";
+
+const sockudo = new Sockudo({
+  appId: "app-id",
+  key: "app-key",
+  secret: "app-secret",
+  host: "127.0.0.1",
+  port: 6001,
+  useTLS: false,
+});
+```
+
+## Publish
+
+```ts
+await sockudo.trigger("orders", "order.created", { id: "ord_123" }, {
+  idempotency_key: "order-created-ord_123",
+});
+
+await sockudo.triggerBatch([
+  { channel: "orders", name: "order.created", data: { id: "ord_124" } },
+  { channel: "orders", name: "order.paid", data: { id: "ord_124" } },
+]);
+```
+
+## Auth
+
+```ts
+app.post("/sockudo/auth", express.urlencoded({ extended: false }), (req, res) => {
+  const { socket_id, channel_name } = req.body;
+  const user = requireUser(req);
+
+  if (channel_name.startsWith("presence-")) {
+    return res.json(sockudo.authorizeChannel(socket_id, channel_name, {
+      user_id: user.id,
+      user_info: { name: user.name },
+    }));
+  }
+
+  res.json(sockudo.authorizeChannel(socket_id, channel_name));
+});
+```
+
+## State and history
+
+```ts
+const channels = await (await sockudo.get({ path: "/channels" })).json();
+const users = await (await sockudo.get({ path: "/channels/presence-lobby/users" })).json();
+const history = await sockudo.channelHistory("orders", {
+  limit: 50,
+  direction: "newest_first",
+});
+```
+
+## Push notifications
+
+```ts
+await sockudo.activateDevice({
+  deviceId: "ios-device-1",
+  clientId: "user-42",
+  platform: "apns",
+  providerToken: "provider-token",
+});
+
+await sockudo.upsertChannelPushSubscription({
+  deviceId: "ios-device-1",
+  clientId: "user-42",
+  channel: "orders",
+});
+
+const accepted = await sockudo.publishPush({
+  recipients: [{ type: "channel", channel: "orders" }],
+  payload: {
+    title: "Order updated",
+    body: "Order ord_123 is packed",
+    data: { order_id: "ord_123" },
+  },
+  idempotency_key: "push-order-ord_123-packed",
+});
+
+const status = await sockudo.getPublishStatus(accepted.publish_id);
+```
+
+Push helpers force async delivery with `sync: false` for production-safe fanout.
