@@ -8336,6 +8336,7 @@ dependencies = [
  "futures-util",
  "http 1.4.0",
  "hyper",
+ "rand 0.9.4",
  "redis",
  "sockudo-core",
  "sockudo-metrics",
