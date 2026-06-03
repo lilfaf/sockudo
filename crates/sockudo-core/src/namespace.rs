@@ -562,6 +562,17 @@ impl Namespace {
         }
     }
 
+    pub async fn update_presence_member(
+        &self,
+        channel: &str,
+        socket_id: &SocketId,
+        user_info: sonic_rs::Value,
+    ) -> Option<PresenceMemberInfo> {
+        let connection = self.get_connection(socket_id)?;
+        let mut conn_guard = connection.inner.lock().await;
+        conn_guard.update_presence_info(channel, user_info)
+    }
+
     pub async fn add_user(&self, ws_ref: WebSocketRef) -> Result<()> {
         let user_id_option = ws_ref.get_user_id().await;
 

@@ -78,6 +78,7 @@ pub struct PresenceHistoryQueryBounds {
 #[serde(rename_all = "snake_case")]
 pub enum PresenceHistoryEventKind {
     MemberAdded,
+    MemberUpdated,
     MemberRemoved,
 }
 
@@ -85,6 +86,7 @@ impl PresenceHistoryEventKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::MemberAdded => "member_added",
+            Self::MemberUpdated => "member_updated",
             Self::MemberRemoved => "member_removed",
         }
     }
@@ -466,6 +468,13 @@ pub trait PresenceHistoryStore: Send + Sync {
                                 last_event_at_ms: item.published_at_ms,
                             },
                         );
+                    }
+                    PresenceHistoryEventKind::MemberUpdated => {
+                        if let Some(member) = members.get_mut(&item.user_id) {
+                            member.last_event = item.event;
+                            member.last_event_serial = item.serial;
+                            member.last_event_at_ms = item.published_at_ms;
+                        }
                     }
                     PresenceHistoryEventKind::MemberRemoved => {
                         members.remove(&item.user_id);
@@ -1833,6 +1842,7 @@ mod tests {
             event_kind: event,
             cause: match event {
                 PresenceHistoryEventKind::MemberAdded => PresenceHistoryEventCause::Join,
+                PresenceHistoryEventKind::MemberUpdated => PresenceHistoryEventCause::Join,
                 PresenceHistoryEventKind::MemberRemoved => PresenceHistoryEventCause::Disconnect,
             },
             user_id: user_id.to_string(),

@@ -881,6 +881,32 @@ impl PusherMessage {
         }
     }
 
+    pub fn member_updated(channel: String, user_id: String, user_info: Value) -> Self {
+        Self {
+            event: Some("sockudo_internal:presence_update".to_string()),
+            channel: Some(channel),
+            data: Some(MessageData::String(
+                json!({
+                    "user_id": user_id,
+                    "user_info": user_info
+                })
+                .to_string(),
+            )),
+            name: None,
+            user_id: None,
+            sequence: None,
+            conflation_key: None,
+            tags: None,
+            message_id: None,
+            stream_id: None,
+            serial: None,
+            idempotency_key: None,
+            extras: None,
+            delta_sequence: None,
+            delta_conflation_key: None,
+        }
+    }
+
     // New helper method for pong response
     pub fn pong() -> Self {
         Self {

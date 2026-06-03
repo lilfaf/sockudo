@@ -50,6 +50,14 @@ Webhook handlers should:
 - tolerate retries
 - preserve raw payloads for audit when compliance requires it
 
+Presence lifecycle events are:
+
+- `member_added`
+- `member_updated`
+- `member_removed`
+
+`member_updated` is emitted for Protocol V2 `sockudo:presence_update` frames. Its payload includes `channel`, `user_id`, and `user_info` with the latest member data.
+
 ## Push webhooks
 
 Push provider status callbacks and push lifecycle webhooks are core to operating notifications. Use them to reconcile provider outcomes with Sockudo publish status.

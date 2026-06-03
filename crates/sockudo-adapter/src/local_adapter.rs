@@ -13,6 +13,7 @@ use sockudo_core::websocket::{SocketId, WebSocketRef};
 use sockudo_protocol::messages::{
     ANNOTATION_EVENT_NAME, MESSAGE_SUMMARY_EVENT_NAME, PusherMessage, generate_message_id,
 };
+use sockudo_protocol::protocol_version::{CANONICAL_PRESENCE_UPDATE, ProtocolVersion};
 use sockudo_protocol::versioned_messages::extract_runtime_action;
 use sockudo_ws::axum_integration::WebSocketWriter;
 use std::any::Any;
@@ -25,6 +26,17 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use tokio::sync::Semaphore;
 use tracing::{debug, error, info, warn};
+
+fn pending_presence_key(app_id: &str, channel: &str, user_id: &str) -> String {
+    format!("{app_id}:{channel}:{user_id}")
+}
+
+#[derive(Debug, Clone)]
+struct PendingPresenceMember {
+    member: PresenceMemberInfo,
+    socket_id: String,
+    generation: u64,
+}
 
 fn filter_annotation_subscribers_in_place(
     channel: &str,
@@ -45,8 +57,20 @@ fn is_v2_annotation_protocol_event(message: &PusherMessage) -> bool {
     )
 }
 
+fn is_v2_only_protocol_event(message: &PusherMessage) -> bool {
+    is_v2_annotation_protocol_event(message)
+        || matches!(
+            message
+                .event
+                .as_deref()
+                .and_then(|event| ProtocolVersion::parse_any_protocol_event(event)),
+            Some((CANONICAL_PRESENCE_UPDATE, true))
+        )
+}
+
 pub struct LocalAdapter {
     pub namespaces: Arc<DashMap<String, Arc<Namespace>>>,
+    pending_presence_members: Arc<DashMap<String, PendingPresenceMember>>,
     pub buffer_multiplier_per_cpu: usize,
     pub max_concurrent: usize,
     // Global semaphore to limit total concurrent broadcast operations across all channels
@@ -73,6 +97,7 @@ impl Clone for LocalAdapter {
     fn clone(&self) -> Self {
         Self {
             namespaces: Arc::clone(&self.namespaces),
+            pending_presence_members: Arc::clone(&self.pending_presence_members),
             buffer_multiplier_per_cpu: self.buffer_multiplier_per_cpu,
             max_concurrent: self.max_concurrent,
             broadcast_semaphore: Arc::clone(&self.broadcast_semaphore),
@@ -136,6 +161,7 @@ impl LocalAdapter {
 
         Self {
             namespaces: Arc::new(DashMap::new()),
+            pending_presence_members: Arc::new(DashMap::new()),
             buffer_multiplier_per_cpu: multiplier,
             max_concurrent,
             broadcast_semaphore: Arc::new(Semaphore::new(max_concurrent * 8)),
@@ -1575,7 +1601,7 @@ impl ConnectionManager for LocalAdapter {
             namespace.get_matching_channel_socket_refs_partitioned_except(channel, except)
         };
 
-        if !is_v2_annotation_protocol_event(&message) {
+        if !is_v2_only_protocol_event(&message) {
             self.send_to_v1_sockets(v1_all_sockets, &message).await?;
         }
 
@@ -1704,10 +1730,21 @@ impl ConnectionManager for LocalAdapter {
         app_id: &str,
         channel: &str,
     ) -> Result<HashMap<String, PresenceMemberInfo>> {
-        match self.existing_namespace(app_id) {
+        let mut members = match self.existing_namespace(app_id) {
             Some(namespace) => namespace.get_channel_members(channel).await,
             None => Ok(HashMap::new()),
+        }?;
+
+        let prefix = format!("{app_id}:{channel}:");
+        for pending in self.pending_presence_members.iter() {
+            if pending.key().starts_with(&prefix) {
+                members
+                    .entry(pending.member.user_id.clone())
+                    .or_insert_with(|| pending.member.clone());
+            }
         }
+
+        Ok(members)
     }
 
     async fn get_channel_sockets(&self, app_id: &str, channel: &str) -> Result<Vec<SocketId>> {
@@ -1856,6 +1893,68 @@ impl ConnectionManager for LocalAdapter {
     ) -> Option<PresenceMemberInfo> {
         let namespace = self.get_or_create_namespace(app_id).await;
         namespace.get_presence_member(channel, socket_id).await
+    }
+
+    async fn update_presence_member(
+        &self,
+        app_id: &str,
+        channel: &str,
+        socket_id: &SocketId,
+        user_info: sonic_rs::Value,
+    ) -> Result<Option<PresenceMemberInfo>> {
+        let namespace = self.get_or_create_namespace(app_id).await;
+        Ok(namespace
+            .update_presence_member(channel, socket_id, user_info)
+            .await)
+    }
+
+    async fn mark_presence_member_pending(
+        &self,
+        app_id: &str,
+        channel: &str,
+        user_id: &str,
+        socket_id: &str,
+        user_info: Option<sonic_rs::Value>,
+        generation: u64,
+    ) -> Result<()> {
+        self.pending_presence_members.insert(
+            pending_presence_key(app_id, channel, user_id),
+            PendingPresenceMember {
+                member: PresenceMemberInfo {
+                    user_id: user_id.to_string(),
+                    user_info,
+                },
+                socket_id: socket_id.to_string(),
+                generation,
+            },
+        );
+        Ok(())
+    }
+
+    async fn cancel_pending_presence_member(
+        &self,
+        app_id: &str,
+        channel: &str,
+        user_id: &str,
+    ) -> Result<Option<String>> {
+        Ok(self
+            .pending_presence_members
+            .remove(&pending_presence_key(app_id, channel, user_id))
+            .map(|(_, pending)| pending.socket_id))
+    }
+
+    async fn remove_pending_presence_member(
+        &self,
+        app_id: &str,
+        channel: &str,
+        user_id: &str,
+        generation: u64,
+    ) -> Result<Option<PresenceMemberInfo>> {
+        let key = pending_presence_key(app_id, channel, user_id);
+        Ok(self
+            .pending_presence_members
+            .remove_if(&key, |_, pending| pending.generation == generation)
+            .map(|(_, pending)| pending.member))
     }
 
     async fn terminate_user_connections(&self, app_id: &str, user_id: &str) -> Result<()> {

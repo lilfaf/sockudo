@@ -1766,6 +1766,8 @@ pub struct LoggingConfig {
 pub struct PresenceConfig {
     pub max_members_per_channel: u32,
     pub max_member_size_in_kb: u32,
+    pub update_rate_limit_per_member_per_second: u32,
+    pub ungraceful_timeout_seconds: u64,
 }
 
 /// WebSocket connection buffer configuration
@@ -2567,6 +2569,8 @@ impl Default for PresenceConfig {
         Self {
             max_members_per_channel: 100,
             max_member_size_in_kb: 2,
+            update_rate_limit_per_member_per_second: 10,
+            ungraceful_timeout_seconds: 0,
         }
     }
 }
@@ -3387,6 +3391,14 @@ impl ServerOptions {
         if let Some(hops) = parse_env_optional::<u32>("RATE_LIMITER_WS_TRUST_HOPS") {
             self.rate_limiter.websocket_rate_limit.trust_hops = Some(hops);
         }
+        self.presence.update_rate_limit_per_member_per_second = parse_env::<u32>(
+            "PRESENCE_UPDATE_RATE_LIMIT_PER_MEMBER_PER_SECOND",
+            self.presence.update_rate_limit_per_member_per_second,
+        );
+        self.presence.ungraceful_timeout_seconds = parse_env::<u64>(
+            "PRESENCE_UNGRACEFUL_TIMEOUT_SECONDS",
+            self.presence.ungraceful_timeout_seconds,
+        );
         if let Ok(prefix) = std::env::var("RATE_LIMITER_REDIS_PREFIX") {
             self.rate_limiter.redis.prefix = Some(prefix);
         }
@@ -4317,6 +4329,12 @@ impl ServerOptions {
 
         if self.versioned_messages.enabled && self.versioned_messages.max_page_size == 0 {
             return Err("versioned_messages.max_page_size must be greater than 0".to_string());
+        }
+        if self.presence.update_rate_limit_per_member_per_second == 0 {
+            return Err(
+                "presence.update_rate_limit_per_member_per_second must be greater than 0"
+                    .to_string(),
+            );
         }
         if self.annotations.enabled && !self.versioned_messages.enabled {
             return Err("annotations require versioned_messages.enabled".to_string());

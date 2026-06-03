@@ -135,6 +135,18 @@ vapid_private_key = "${WEB_PUSH_PRIVATE_KEY}"
 
 Use the queue backend for push fanout. Direct synchronous provider delivery is only suitable for tests and can hide production latency.
 
+## Presence
+
+```toml
+[presence]
+max_members_per_channel = 100
+max_member_size_in_kb = 2
+update_rate_limit_per_member_per_second = 10
+ungraceful_timeout_seconds = 0
+```
+
+`ungraceful_timeout_seconds = 0` preserves legacy immediate `member_removed` behavior. Set it to `15` for agent presence channels that should tolerate short abnormal reconnects without leave/enter flaps.
+
 ## Webhooks
 
 ```toml

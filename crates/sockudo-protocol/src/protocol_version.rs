@@ -131,6 +131,7 @@ pub const CANONICAL_SUBSCRIPTION_SUCCEEDED: &str = "subscription_succeeded";
 pub const CANONICAL_SUBSCRIPTION_ERROR: &str = "subscription_error";
 pub const CANONICAL_MEMBER_ADDED: &str = "member_added";
 pub const CANONICAL_MEMBER_REMOVED: &str = "member_removed";
+pub const CANONICAL_PRESENCE_UPDATE: &str = "presence_update";
 
 // Delta compression canonical names
 pub const CANONICAL_ENABLE_DELTA_COMPRESSION: &str = "enable_delta_compression";

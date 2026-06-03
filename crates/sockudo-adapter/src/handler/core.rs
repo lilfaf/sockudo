@@ -128,6 +128,7 @@ impl ConnectionHandler {
                         Some(socket_id),
                         sockudo_core::presence_history::PresenceHistoryEventCause::Disconnect,
                         None,
+                        0,
                         Some(presence_history_policy.retention()),
                     )
                     .await?;
@@ -251,6 +252,29 @@ impl ConnectionHandler {
     }
 
     pub async fn handle_disconnect(&self, app_id: &str, socket_id: &SocketId) -> Result<()> {
+        self.handle_disconnect_with_presence_timeout(app_id, socket_id, 0)
+            .await
+    }
+
+    pub async fn handle_ungraceful_disconnect(
+        &self,
+        app_id: &str,
+        socket_id: &SocketId,
+    ) -> Result<()> {
+        self.handle_disconnect_with_presence_timeout(
+            app_id,
+            socket_id,
+            self.server_options().presence.ungraceful_timeout_seconds,
+        )
+        .await
+    }
+
+    async fn handle_disconnect_with_presence_timeout(
+        &self,
+        app_id: &str,
+        socket_id: &SocketId,
+        presence_ungraceful_timeout_seconds: u64,
+    ) -> Result<()> {
         debug!("Handling disconnect for socket: {}", socket_id);
 
         // Try async cleanup first if queue is available and circuit breaker allows
@@ -258,7 +282,12 @@ impl ConnectionHandler {
             // should_use_async_cleanup() already verified cleanup_queue exists
             let cleanup_queue = self.cleanup_queue.as_ref().unwrap();
             match self
-                .handle_disconnect_async(app_id, socket_id, cleanup_queue)
+                .handle_disconnect_async(
+                    app_id,
+                    socket_id,
+                    cleanup_queue,
+                    presence_ungraceful_timeout_seconds,
+                )
                 .await
             {
                 Ok(()) => {
@@ -296,7 +325,8 @@ impl ConnectionHandler {
         }
 
         // Fall back to original synchronous cleanup
-        self.handle_disconnect_sync(app_id, socket_id).await
+        self.handle_disconnect_sync(app_id, socket_id, presence_ungraceful_timeout_seconds)
+            .await
     }
 
     async fn handle_disconnect_async(
@@ -304,6 +334,7 @@ impl ConnectionHandler {
         app_id: &str,
         socket_id: &SocketId,
         cleanup_queue: &crate::cleanup::CleanupSender,
+        presence_ungraceful_timeout_seconds: u64,
     ) -> Result<()> {
         use std::time::Instant;
 
@@ -354,6 +385,7 @@ impl ConnectionHandler {
                     } else {
                         None
                     },
+                    presence_ungraceful_timeout_seconds,
                 })
             } else {
                 // Connection doesn't exist - might have been cleaned up already
@@ -406,7 +438,9 @@ impl ConnectionHandler {
 
                 // Fall back to synchronous cleanup immediately
                 // We already have the disconnect task info, so use sync cleanup
-                return self.handle_disconnect_sync(app_id, socket_id).await;
+                return self
+                    .handle_disconnect_sync(app_id, socket_id, presence_ungraceful_timeout_seconds)
+                    .await;
             }
             debug!("Queued async cleanup for socket: {}", socket_id);
         }
@@ -424,7 +458,12 @@ impl ConnectionHandler {
         Ok(())
     }
 
-    async fn handle_disconnect_sync(&self, app_id: &str, socket_id: &SocketId) -> Result<()> {
+    async fn handle_disconnect_sync(
+        &self,
+        app_id: &str,
+        socket_id: &SocketId,
+        presence_ungraceful_timeout_seconds: u64,
+    ) -> Result<()> {
         debug!("Using synchronous cleanup for socket: {}", socket_id);
 
         // This is the original synchronous implementation
@@ -513,6 +552,7 @@ impl ConnectionHandler {
                 &app_config,
                 &subscribed_channels,
                 &user_id,
+                presence_ungraceful_timeout_seconds,
             )
             .await?;
         }
@@ -578,6 +618,7 @@ impl ConnectionHandler {
         app_config: &App,
         subscribed_channels: &HashSet<String>,
         user_id: &Option<String>,
+        presence_ungraceful_timeout_seconds: u64,
     ) -> Result<()> {
         if subscribed_channels.is_empty() {
             return Ok(());
@@ -621,6 +662,7 @@ impl ConnectionHandler {
                                     user_id,
                                     *remaining_connections,
                                     socket_id,
+                                    presence_ungraceful_timeout_seconds,
                                 )
                                 .await?;
                             }
@@ -652,6 +694,7 @@ impl ConnectionHandler {
         user_id: &Option<String>,
         current_sub_count: usize,
         socket_id: &SocketId,
+        presence_ungraceful_timeout_seconds: u64,
     ) -> Result<()> {
         if channel_str.starts_with("presence-") {
             if let Some(disconnected_user_id) = user_id {
@@ -673,6 +716,7 @@ impl ConnectionHandler {
                         Some(socket_id),
                         sockudo_core::presence_history::PresenceHistoryEventCause::Disconnect,
                         None,
+                        presence_ungraceful_timeout_seconds,
                         Some(presence_history_policy.retention()),
                     )
                     .await
@@ -1066,6 +1110,7 @@ impl ConnectionHandler {
                         None, // No excluding socket for dead node cleanup
                         sockudo_core::presence_history::PresenceHistoryEventCause::OrphanCleanup,
                         Some(&event.dead_node_id),
+                        0,
                         Some(presence_history_policy.retention()),
                     )
                     .await

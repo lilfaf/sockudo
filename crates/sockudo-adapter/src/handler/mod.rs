@@ -7,6 +7,7 @@ mod core;
 mod history_frames;
 pub mod message_handlers;
 pub mod origin_validation;
+pub mod presence_update;
 pub mod rate_limiting;
 #[cfg(feature = "recovery")]
 pub mod recovery;
@@ -65,6 +66,7 @@ pub struct ConnectionHandler {
     webhook_integration: Option<Arc<WebhookIntegration>>,
     client_event_limiters: Arc<DashMap<SocketId, Arc<dyn RateLimiter + Send + Sync>>>,
     message_limiters: Arc<DashMap<SocketId, Arc<dyn RateLimiter + Send + Sync>>>,
+    presence_update_limiters: Arc<DashMap<String, Arc<dyn RateLimiter + Send + Sync>>>,
     history_request_limits: Arc<DashMap<SocketId, Arc<Semaphore>>>,
     watchlist_manager: Arc<WatchlistManager>,
     server_options: Arc<ServerOptions>,
@@ -243,6 +245,7 @@ impl ConnectionHandlerBuilder {
             webhook_integration: self.webhook_integration,
             client_event_limiters: Arc::new(DashMap::new()),
             message_limiters: Arc::new(DashMap::new()),
+            presence_update_limiters: Arc::new(DashMap::new()),
             history_request_limits: Arc::new(DashMap::new()),
             watchlist_manager: Arc::new(WatchlistManager::new()),
             server_options: Arc::new(self.server_options),
@@ -380,6 +383,7 @@ impl ConnectionHandler {
         self.replay_buffer.as_ref()
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn handle_socket(
         &self,
         socket: WebSocket,
@@ -831,6 +835,10 @@ impl ConnectionHandler {
                 self.handle_channel_history_request(socket_id, &app_config, &parsed)
                     .await
             }
+            Some((CANONICAL_PRESENCE_UPDATE, false)) => {
+                self.handle_presence_update(socket_id, &app_config, &parsed)
+                    .await
+            }
             None if event_name == "channel_history" => {
                 self.handle_channel_history_request(socket_id, &app_config, &parsed)
                     .await
@@ -953,7 +961,10 @@ impl ConnectionHandler {
 
         // Ensure disconnect cleanup is called to properly decrement connection count
         // This handles cases where the message loop exits without receiving a clean Close frame
-        if let Err(e) = self.handle_disconnect(&app_config.id, socket_id).await {
+        if let Err(e) = self
+            .handle_ungraceful_disconnect(&app_config.id, socket_id)
+            .await
+        {
             warn!(
                 "Failed to handle disconnect during cleanup for {}: {}",
                 socket_id, e

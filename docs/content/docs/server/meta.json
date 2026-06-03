@@ -11,6 +11,7 @@
     "webhooks",
     "push-notifications",
     "ai-transport-conventions",
-    "token-streaming-rollup"
+    "token-streaming-rollup",
+    "agent-presence"
   ]
 }

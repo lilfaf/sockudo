@@ -388,6 +388,27 @@ impl WebhookIntegration {
         self.add_webhook("webhooks", job_data).await
     }
 
+    pub async fn send_member_updated(
+        &self,
+        app: &App,
+        channel: &str,
+        user_id: &str,
+        user_info: Value,
+    ) -> Result<()> {
+        if !self.should_send_webhook(app, "member_updated").await {
+            return Ok(());
+        }
+        let event_obj = json!({
+            "name": "member_updated",
+            "channel": channel,
+            "user_id": user_id,
+            "user_info": user_info
+        });
+        let signature = format!("{}:{}:{}:member_updated", app.id, channel, user_id);
+        let job_data = self.create_job_data(app, vec![event_obj], &signature);
+        self.add_webhook("webhooks", job_data).await
+    }
+
     pub async fn send_client_event(
         &self,
         app: &App,

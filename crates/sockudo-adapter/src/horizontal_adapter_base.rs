@@ -1533,6 +1533,57 @@ where
             .await
     }
 
+    async fn update_presence_member(
+        &self,
+        app_id: &str,
+        channel: &str,
+        socket_id: &SocketId,
+        user_info: sonic_rs::Value,
+    ) -> Result<Option<PresenceMemberInfo>> {
+        self.local_adapter
+            .update_presence_member(app_id, channel, socket_id, user_info)
+            .await
+    }
+
+    async fn mark_presence_member_pending(
+        &self,
+        app_id: &str,
+        channel: &str,
+        user_id: &str,
+        socket_id: &str,
+        user_info: Option<sonic_rs::Value>,
+        generation: u64,
+    ) -> Result<()> {
+        self.local_adapter
+            .mark_presence_member_pending(
+                app_id, channel, user_id, socket_id, user_info, generation,
+            )
+            .await
+    }
+
+    async fn cancel_pending_presence_member(
+        &self,
+        app_id: &str,
+        channel: &str,
+        user_id: &str,
+    ) -> Result<Option<String>> {
+        self.local_adapter
+            .cancel_pending_presence_member(app_id, channel, user_id)
+            .await
+    }
+
+    async fn remove_pending_presence_member(
+        &self,
+        app_id: &str,
+        channel: &str,
+        user_id: &str,
+        generation: u64,
+    ) -> Result<Option<PresenceMemberInfo>> {
+        self.local_adapter
+            .remove_pending_presence_member(app_id, channel, user_id, generation)
+            .await
+    }
+
     async fn terminate_user_connections(&self, app_id: &str, user_id: &str) -> Result<()> {
         self.terminate_connection(app_id, user_id).await
     }
@@ -1834,6 +1885,52 @@ impl<T: HorizontalTransport> HorizontalAdapterInterface for HorizontalAdapterBas
         };
 
         // Send without waiting for response (broadcast) - skip if single node
+        if !self.should_skip_horizontal_communication().await {
+            self.transport.publish_request(&request).await
+        } else {
+            Ok(())
+        }
+    }
+
+    async fn broadcast_presence_update(
+        &self,
+        app_id: &str,
+        channel: &str,
+        user_id: &str,
+        socket_id: &str,
+        user_info: sonic_rs::Value,
+    ) -> Result<()> {
+        self.horizontal
+            .update_presence_entry(
+                &self.node_id,
+                channel,
+                socket_id,
+                user_id,
+                app_id,
+                user_info.clone(),
+            )
+            .await;
+
+        if !self.cluster_health_enabled {
+            return Ok(());
+        }
+
+        let request = RequestBody {
+            request_id: crate::horizontal_adapter::generate_request_id(),
+            node_id: self.node_id.clone(),
+            app_id: app_id.to_string(),
+            request_type: RequestType::PresenceMemberUpdated,
+            channel: Some(channel.to_string()),
+            socket_id: Some(socket_id.to_string()),
+            user_id: Some(user_id.to_string()),
+            user_info: Some(user_info),
+            timestamp: None,
+            dead_node_id: None,
+            target_node_id: None,
+            reply_to: None,
+            channels: None,
+        };
+
         if !self.should_skip_horizontal_communication().await {
             self.transport.publish_request(&request).await
         } else {

@@ -1025,6 +1025,16 @@ impl WebSocket {
         self.state.presence.as_mut()?.remove(channel)
     }
 
+    pub fn update_presence_info(
+        &mut self,
+        channel: &str,
+        user_info: sonic_rs::Value,
+    ) -> Option<PresenceMemberInfo> {
+        let member = self.state.presence.as_mut()?.get_mut(channel)?;
+        member.user_info = Some(user_info);
+        Some(member.clone())
+    }
+
     pub fn subscribe_to_channel(&mut self, channel: String) {
         self.state.add_subscription(channel);
     }

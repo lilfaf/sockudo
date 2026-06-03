@@ -41,8 +41,9 @@ pub enum RequestType {
     CountUserConnectionsInChannel, // Count user's connections in a specific channel
 
     // Presence replication requests
-    PresenceMemberJoined, // Replicate presence member join across nodes
-    PresenceMemberLeft,   // Replicate presence member leave across nodes
+    PresenceMemberJoined,  // Replicate presence member join across nodes
+    PresenceMemberLeft,    // Replicate presence member leave across nodes
+    PresenceMemberUpdated, // Replicate presence member data update across nodes
 
     // Node health requests
     Heartbeat, // Node health heartbeat
@@ -443,6 +444,24 @@ impl HorizontalAdapter {
                     // Use the helper method to update cluster presence registry
                     self.remove_presence_entry(&request.node_id, channel, socket_id)
                         .await;
+                }
+            }
+            RequestType::PresenceMemberUpdated => {
+                if let (Some(channel), Some(user_id), Some(socket_id), Some(user_info)) = (
+                    &request.channel,
+                    &request.user_id,
+                    &request.socket_id,
+                    &request.user_info,
+                ) {
+                    self.update_presence_entry(
+                        &request.node_id,
+                        channel,
+                        socket_id,
+                        user_id,
+                        &request.app_id,
+                        user_info.clone(),
+                    )
+                    .await;
                 }
             }
             RequestType::Heartbeat => {
@@ -932,6 +951,9 @@ impl HorizontalAdapter {
                 RequestType::PresenceMemberLeft => {
                     // These are broadcast-only requests, no response aggregation needed
                 }
+                RequestType::PresenceMemberUpdated => {
+                    // These are broadcast-only requests, no response aggregation needed
+                }
                 RequestType::Heartbeat => {
                     // These are broadcast-only requests, no response aggregation needed
                 }
@@ -1197,6 +1219,49 @@ impl HorizontalAdapter {
         debug!(
             "Removed presence entry: socket {} in channel {} for node {}",
             socket_id, channel, node_id
+        );
+    }
+
+    /// Update presence member data in the cluster registry.
+    pub async fn update_presence_entry(
+        &self,
+        node_id: &str,
+        channel: &str,
+        socket_id: &str,
+        user_id: &str,
+        app_id: &str,
+        user_info: sonic_rs::Value,
+    ) {
+        let mut registry = self.cluster_presence_registry.write().await;
+        let channel_entries = registry
+            .entry(node_id.to_string())
+            .or_insert_with(AHashMap::new)
+            .entry(channel.to_string())
+            .or_insert_with(AHashMap::new);
+
+        match channel_entries.get_mut(socket_id) {
+            Some(entry) => {
+                entry.user_info = Some(user_info);
+                entry.sequence_number = self.sequence_counter.fetch_add(1, Ordering::SeqCst);
+            }
+            None => {
+                channel_entries.insert(
+                    socket_id.to_string(),
+                    PresenceEntry {
+                        user_info: Some(user_info),
+                        node_id: node_id.to_string(),
+                        app_id: app_id.to_string(),
+                        user_id: user_id.to_string(),
+                        socket_id: socket_id.to_string(),
+                        sequence_number: self.sequence_counter.fetch_add(1, Ordering::SeqCst),
+                    },
+                );
+            }
+        }
+
+        debug!(
+            "Updated presence entry: user {} (socket {}) in channel {} for node {}",
+            user_id, socket_id, channel, node_id
         );
     }
 
