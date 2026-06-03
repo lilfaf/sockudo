@@ -11,6 +11,7 @@ members = [
   "crates/sockudo-webhook",
   "crates/sockudo-delta",
   "crates/sockudo-push",
+  "crates/sockudo-ai-transport",
   "crates/sockudo-adapter",
   "crates/sockudo-server",
 ]
@@ -38,6 +39,7 @@ sockudo-metrics = { version = "4.5.1", path = "crates/sockudo-metrics" }
 sockudo-webhook = { version = "4.5.1", path = "crates/sockudo-webhook" }
 sockudo-delta = { version = "4.5.1", path = "crates/sockudo-delta" }
 sockudo-push = { version = "4.5.1", path = "crates/sockudo-push" }
+sockudo-ai-transport = { version = "4.5.1", path = "crates/sockudo-ai-transport" }
 sockudo-adapter = { version = "4.5.1", path = "crates/sockudo-adapter", default-features = false }
 
 # External dependencies (shared versions)

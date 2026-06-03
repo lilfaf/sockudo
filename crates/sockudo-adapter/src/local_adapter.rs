@@ -1935,6 +1935,10 @@ impl ConnectionManager for LocalAdapter {
         }
     }
 
+    async fn get_all_connections(&self, app_id: &str) -> Result<Vec<SocketId>> {
+        Ok(LocalAdapter::get_all_connections(self, app_id).await)
+    }
+
     async fn get_namespaces(&self) -> Result<Vec<(String, Arc<Namespace>)>> {
         Ok(self
             .namespaces
@@ -1996,6 +2000,7 @@ mod tests {
                 idempotency_key: Some("extra-idem".to_string()),
                 push: None,
                 echo: Some(false),
+                ai: None,
             }),
             delta_sequence: None,
             delta_conflation_key: None,

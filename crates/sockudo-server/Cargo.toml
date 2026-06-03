@@ -10,6 +10,7 @@ license-file.workspace = true
 [features]
 default = ["local", "v2"]
 versioned-messages = []
+ai-transport = ["sockudo-core/ai-transport", "sockudo-protocol/ai-transport", "sockudo-adapter/ai-transport", "versioned-messages"]
 local = []
 v2 = ["delta", "tag-filtering", "recovery"]
 delta = ["sockudo-adapter/delta", "sockudo-delta"]

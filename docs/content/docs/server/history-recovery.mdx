@@ -37,6 +37,8 @@ client.bind("sockudo:resume_success", (payload) => {
 });
 ```
 
+If a channel emits `sockudo:resume_failed` with `code: "position_expired"`, the hot replay buffer and durable recovery window could not prove continuity. Resubscribe, then backfill with V2 channel history using `until_attach: true` so the history page is bounded at the subscription's attach serial.
+
 ## Rewind
 
 Subscribe-time rewind asks Sockudo to send recent history when a client joins:
@@ -53,7 +55,7 @@ channel.bind("sockudo:rewind_complete", (payload) => {
 
 ## Durable channel history
 
-Server SDKs expose channel history helpers. Use history for views that need pagination or late reconstruction.
+Server SDKs expose app-key channel history helpers. Use signed app-key HTTP history for backend jobs, administrative reads, and server SDKs.
 
 ```python
 page = sockudo.get_channel_history(
@@ -63,6 +65,25 @@ page = sockudo.get_channel_history(
 ```
 
 Opaque cursors make storage implementation details private. Store the cursor as a token and pass it back unchanged.
+
+Protocol V2 clients use WebSocket `channel_history` frames instead of direct HTTP history. Token-authenticated clients need the `history` capability for the requested channel. The existing app-key HTTP endpoint remains server-only; there is no client-token HTTP history surface in v1.
+
+```json
+{
+  "event": "sockudo:channel_history",
+  "data": {
+    "channel": "orders",
+    "limit": 100,
+    "direction": "backwards",
+    "cursor": null,
+    "start_serial": 1,
+    "end_serial": 100,
+    "until_attach": true
+  }
+}
+```
+
+The response uses the same history payload shape as app-key HTTP history: `items`, `direction`, `limit`, `has_more`, `next_cursor`, `bounds`, `continuity`, and `stream_state`. Limits are capped at `1000` and may be lowered by channel policy. `direction` defaults to backwards/newest-first. `until_attach: true` bounds results to `history_serial <= attach_serial`, while live delivery after subscribe continues above that attach serial. Mutable messages are returned as the latest aggregated V2 message, not raw operation log rows.
 
 ## Presence history
 

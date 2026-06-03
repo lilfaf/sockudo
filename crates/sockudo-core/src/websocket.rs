@@ -1,6 +1,7 @@
 #![allow(async_fn_in_trait)]
 
 use crate::app::App;
+use crate::capability_token::TokenAuthContext;
 use crate::channel::PresenceMemberInfo;
 use crate::error::{Error, Result};
 use crate::utils::wildcard_pattern_matches;
@@ -307,6 +308,7 @@ pub struct UserInfo {
 pub struct ConnectionCapabilities {
     pub subscribe: Option<Vec<String>>,
     pub publish: Option<Vec<String>>,
+    pub history: Option<Vec<String>>,
     pub presence: Option<Vec<String>>,
     #[serde(rename = "annotation-subscribe", alias = "annotation_subscribe")]
     pub annotation_subscribe: Option<Vec<String>>,
@@ -325,7 +327,7 @@ pub struct ConnectionCapabilities {
 }
 
 impl ConnectionCapabilities {
-    fn matches_any(patterns: &[String], channel: &str) -> bool {
+    pub fn matches_any(patterns: &[String], channel: &str) -> bool {
         patterns.iter().any(|pattern| {
             pattern == "*" || pattern == channel || wildcard_pattern_matches(channel, pattern)
         })
@@ -345,6 +347,12 @@ impl ConnectionCapabilities {
 
     pub fn allows_publish(&self, channel: &str) -> bool {
         self.publish
+            .as_deref()
+            .is_none_or(|patterns| Self::matches_any(patterns, channel))
+    }
+
+    pub fn allows_history(&self, channel: &str) -> bool {
+        self.history
             .as_deref()
             .is_none_or(|patterns| Self::matches_any(patterns, channel))
     }
@@ -479,6 +487,7 @@ pub struct ConnectionState {
     pub user_id: Option<String>,
     pub user_info: Option<UserInfo>,
     pub connection_capabilities: Option<ConnectionCapabilities>,
+    pub token_auth_context: Option<TokenAuthContext>,
     pub connection_meta: Option<Value>,
     pub last_ping: Instant,
     pub presence: Option<HashMap<String, PresenceMemberInfo>>,
@@ -509,6 +518,7 @@ impl ConnectionState {
             user_id: None,
             user_info: None,
             connection_capabilities: None,
+            token_auth_context: None,
             connection_meta: None,
             last_ping: Instant::now(),
             presence: None,
@@ -531,6 +541,7 @@ impl ConnectionState {
             user_id: None,
             user_info: None,
             connection_capabilities: None,
+            token_auth_context: None,
             connection_meta: None,
             last_ping: Instant::now(),
             presence: None,
@@ -923,7 +934,7 @@ impl WebSocket {
 
         // Send error message while connection still active
         if code >= 4000 {
-            let error_message = PusherMessage::error(code, reason.clone(), None);
+            let error_message = PusherMessage::error(u32::from(code), reason.clone(), None);
             if let Err(e) = self.send_message(&error_message) {
                 warn!("Failed to send error message before close: {}", e);
             }
@@ -981,6 +992,23 @@ impl WebSocket {
         if let Some(info) = &user_info.info {
             self.state.user = Some(info.clone());
         }
+    }
+
+    pub fn set_token_auth_context(&mut self, context: TokenAuthContext) {
+        self.state.user_id = Some(context.client_id.clone());
+        self.state.connection_capabilities = Some(context.capabilities.clone());
+        self.state.connection_meta = None;
+        self.state.user_info = Some(UserInfo {
+            id: context.client_id.clone(),
+            watchlist: None,
+            info: None,
+            capabilities: Some(context.capabilities.clone()),
+            meta: None,
+        });
+        self.state.user = Some(sonic_rs::json!({
+            "id": context.client_id.clone(),
+        }));
+        self.state.token_auth_context = Some(context);
     }
 
     pub fn add_presence_info(&mut self, channel: String, member_info: PresenceMemberInfo) {
@@ -1046,6 +1074,8 @@ pub struct WebSocketRef {
     pub event_name_filters: Arc<DashMap<String, Option<Vec<String>>>>,
     /// V2 raw annotation delivery mode per channel.
     pub annotation_subscriptions: Arc<DashMap<String, bool>>,
+    /// V2 history head captured at subscription acknowledgement time.
+    pub attach_serials: Arc<DashMap<String, u64>>,
     pub rewind_gates: Arc<DashMap<String, Arc<Mutex<RewindGate>>>>,
     pub socket_id: SocketId,
     pub buffer_config: WebSocketBufferConfig,
@@ -1076,6 +1106,7 @@ impl WebSocketRef {
 
         let event_name_filters = Arc::new(DashMap::new());
         let annotation_subscriptions = Arc::new(DashMap::new());
+        let attach_serials = Arc::new(DashMap::new());
         let rewind_gates = Arc::new(DashMap::new());
 
         Self {
@@ -1083,6 +1114,7 @@ impl WebSocketRef {
             channel_filters,
             event_name_filters,
             annotation_subscriptions,
+            attach_serials,
             rewind_gates,
             socket_id,
             buffer_config,
@@ -1201,6 +1233,16 @@ impl WebSocketRef {
         ws.state.connection_capabilities.clone()
     }
 
+    pub async fn get_token_auth_context(&self) -> Option<TokenAuthContext> {
+        let ws = self.inner.lock().await;
+        ws.state.token_auth_context.clone()
+    }
+
+    pub async fn set_token_auth_context(&self, context: TokenAuthContext) {
+        let mut ws = self.inner.lock().await;
+        ws.set_token_auth_context(context);
+    }
+
     pub async fn get_connection_meta(&self) -> Option<Value> {
         let ws = self.inner.lock().await;
         ws.state.connection_meta.clone()
@@ -1216,7 +1258,8 @@ impl WebSocketRef {
         ws.subscribe_to_channel(channel.clone());
         self.channel_filters.insert(channel.clone(), None);
         self.event_name_filters.insert(channel.clone(), None);
-        self.annotation_subscriptions.insert(channel, false);
+        self.annotation_subscriptions.insert(channel.clone(), false);
+        self.attach_serials.remove(&channel);
     }
 
     pub async fn subscribe_to_channel_with_filter(
@@ -1233,7 +1276,8 @@ impl WebSocketRef {
         self.channel_filters
             .insert(channel.clone(), filter.map(Arc::new));
         self.event_name_filters.insert(channel.clone(), None);
-        self.annotation_subscriptions.insert(channel, false);
+        self.annotation_subscriptions.insert(channel.clone(), false);
+        self.attach_serials.remove(&channel);
     }
 
     /// Subscribe with both tag filter and event name filter (V2).
@@ -1255,7 +1299,8 @@ impl WebSocketRef {
         self.event_name_filters
             .insert(channel.clone(), event_name_filter);
         self.annotation_subscriptions
-            .insert(channel, annotation_subscribe);
+            .insert(channel.clone(), annotation_subscribe);
+        self.attach_serials.remove(&channel);
     }
 
     pub async fn unsubscribe_from_channel(&self, channel: &str) -> bool {
@@ -1264,6 +1309,7 @@ impl WebSocketRef {
         self.channel_filters.remove(channel);
         self.event_name_filters.remove(channel);
         self.annotation_subscriptions.remove(channel);
+        self.attach_serials.remove(channel);
         result
     }
 
@@ -1290,6 +1336,14 @@ impl WebSocketRef {
         self.annotation_subscriptions
             .get(channel)
             .is_some_and(|entry| *entry.value())
+    }
+
+    pub fn set_attach_serial(&self, channel: String, serial: u64) {
+        self.attach_serials.insert(channel, serial);
+    }
+
+    pub fn attach_serial(&self, channel: &str) -> Option<u64> {
+        self.attach_serials.get(channel).map(|entry| *entry.value())
     }
 
     pub fn start_rewind_gate(&self, channel: String) {
@@ -1360,7 +1414,7 @@ impl WebSocketExt for WebSocketRef {
     }
 
     async fn send_error(&self, code: u16, message: String, channel: Option<String>) -> Result<()> {
-        let error_msg = PusherMessage::error(code, message, channel);
+        let error_msg = PusherMessage::error(u32::from(code), message, channel);
         self.send_message(&error_msg).await
     }
 

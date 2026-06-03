@@ -193,6 +193,10 @@ pub trait ConnectionManager: Send + Sync {
     async fn get_channels_with_socket_count(&self, app_id: &str) -> Result<HashMap<String, usize>>;
 
     async fn get_sockets_count(&self, app_id: &str) -> Result<usize>;
+    async fn get_all_connections(&self, app_id: &str) -> Result<Vec<SocketId>> {
+        let _ = app_id;
+        Ok(Vec::new())
+    }
     async fn get_namespaces(&self) -> Result<Vec<(String, Arc<Namespace>)>>;
     fn as_any_mut(&mut self) -> &mut dyn Any;
 

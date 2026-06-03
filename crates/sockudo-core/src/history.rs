@@ -396,6 +396,10 @@ pub trait HistoryStore: Send + Sync {
 
     async fn read_page(&self, request: HistoryReadRequest) -> Result<HistoryPage>;
 
+    async fn channel_head(&self, app_id: &str, channel: &str) -> Result<HistoryRetentionStats> {
+        Ok(self.stream_inspection(app_id, channel).await?.retained)
+    }
+
     async fn stream_runtime_state(
         &self,
         app_id: &str,
@@ -483,6 +487,10 @@ impl HistoryStore for NoopHistoryStore {
         Err(Error::Configuration(
             "Durable history is not configured".to_string(),
         ))
+    }
+
+    async fn channel_head(&self, _app_id: &str, _channel: &str) -> Result<HistoryRetentionStats> {
+        Ok(HistoryRetentionStats::default())
     }
 
     async fn stream_runtime_state(
@@ -817,6 +825,20 @@ impl HistoryStore for MemoryHistoryStore {
             complete: !has_more && !truncated_by_retention,
             truncated_by_retention,
         })
+    }
+
+    async fn channel_head(&self, app_id: &str, channel: &str) -> Result<HistoryRetentionStats> {
+        let key = Self::channel_key(app_id, channel);
+        let mut channels = self.channels.write().await;
+        let Some(channel_state) = channels.get_mut(&key) else {
+            return Ok(HistoryRetentionStats::default());
+        };
+        let retention = channel_state
+            .retention
+            .clone()
+            .unwrap_or_else(|| Self::default_retention(&self.config));
+        Self::evict_channel(&retention, channel_state);
+        Ok(Self::retained_from_channel(channel_state))
     }
 
     async fn runtime_status(&self) -> Result<HistoryRuntimeStatus> {
@@ -1332,6 +1354,17 @@ mod tests {
             .unwrap();
 
         assert!(page.items.is_empty());
+        assert_eq!(store.channels.read().await.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn memory_history_channel_head_does_not_materialize_absent_channels() {
+        let store = MemoryHistoryStore::new(MemoryHistoryStoreConfig::default());
+
+        let head = store.channel_head("app", "missing").await.unwrap();
+
+        assert_eq!(head.retained_messages, 0);
+        assert_eq!(head.newest_serial, None);
         assert_eq!(store.channels.read().await.len(), 0);
     }
 }

@@ -1,8 +1,10 @@
 // src/adapter/handler/mod.rs
 pub mod annotations;
+pub mod auth_tokens;
 pub mod authentication;
 pub mod connection_management;
 mod core;
+mod history_frames;
 pub mod message_handlers;
 pub mod origin_validation;
 pub mod rate_limiting;
@@ -18,6 +20,8 @@ pub mod webhook_management;
 use crate::ConnectionManager;
 use crate::presence::PresenceManager;
 use crate::watchlist::WatchlistManager;
+#[cfg(feature = "ai-transport")]
+use sockudo_ai_transport::{RollupConfig, RollupEngine};
 use sockudo_core::annotations::{AnnotationStore, MemoryAnnotationStore};
 use sockudo_core::app::App;
 use sockudo_core::app::AppManager;
@@ -31,7 +35,7 @@ use sockudo_core::rate_limiter::RateLimiter;
 use sockudo_core::version_store::{NoopVersionStore, VersionStore};
 use sockudo_core::websocket::SocketId;
 use sockudo_protocol::constants::CLIENT_EVENT_PREFIX;
-use sockudo_protocol::messages::{MessageData, PusherMessage};
+use sockudo_protocol::messages::{MessageData, PusherMessage, is_ai_event};
 use sockudo_protocol::{ProtocolVersion, WireFormat};
 use sockudo_webhook::WebhookIntegration;
 
@@ -42,6 +46,7 @@ use sockudo_ws::axum_integration::{WebSocket, WebSocketReader, WebSocketWriter};
 use sonic_rs::Value;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize};
+use tokio::sync::Semaphore;
 use tracing::{debug, error, warn};
 
 #[derive(Clone)]
@@ -54,10 +59,13 @@ pub struct ConnectionHandler {
     pub(crate) history_store: Arc<dyn HistoryStore + Send + Sync>,
     pub(crate) annotation_store: Arc<dyn AnnotationStore + Send + Sync>,
     pub(crate) version_store: Arc<dyn VersionStore + Send + Sync>,
+    #[cfg(feature = "ai-transport")]
+    pub(crate) ai_rollup_engine: Option<Arc<RollupEngine>>,
     pub(crate) presence_history_store: Arc<dyn PresenceHistoryStore + Send + Sync>,
     webhook_integration: Option<Arc<WebhookIntegration>>,
     client_event_limiters: Arc<DashMap<SocketId, Arc<dyn RateLimiter + Send + Sync>>>,
     message_limiters: Arc<DashMap<SocketId, Arc<dyn RateLimiter + Send + Sync>>>,
+    history_request_limits: Arc<DashMap<SocketId, Arc<Semaphore>>>,
     watchlist_manager: Arc<WatchlistManager>,
     server_options: Arc<ServerOptions>,
     cleanup_queue: Option<crate::cleanup::CleanupSender>,
@@ -187,6 +195,31 @@ impl ConnectionHandlerBuilder {
             ))
         });
 
+        #[cfg(feature = "ai-transport")]
+        let ai_rollup_engine = if self.server_options.ai_transport.enabled
+            && self.server_options.ai_transport.rollup.enabled
+        {
+            let rollup = &self.server_options.ai_transport.rollup;
+            Some(Arc::new(RollupEngine::new(RollupConfig {
+                enabled: rollup.enabled,
+                window_ms: rollup.default_window_ms,
+                orphan_ttl_ms: rollup.orphan_ttl_ms,
+                shards: rollup.shards,
+            })))
+        } else {
+            None
+        };
+
+        #[cfg(feature = "ai-transport")]
+        if let Some(engine) = ai_rollup_engine.as_ref() {
+            start_ai_rollup_worker(
+                Arc::clone(engine),
+                Arc::clone(&self.connection_manager),
+                self.metrics.clone(),
+                self.server_options.ai_transport.rollup.wheel_tick_ms,
+            );
+        }
+
         ConnectionHandler {
             app_manager: self.app_manager,
             connection_manager: self.connection_manager,
@@ -202,12 +235,15 @@ impl ConnectionHandlerBuilder {
             version_store: self
                 .version_store
                 .unwrap_or_else(|| Arc::new(NoopVersionStore)),
+            #[cfg(feature = "ai-transport")]
+            ai_rollup_engine,
             presence_history_store: self
                 .presence_history_store
                 .unwrap_or_else(|| Arc::new(NoopPresenceHistoryStore)),
             webhook_integration: self.webhook_integration,
             client_event_limiters: Arc::new(DashMap::new()),
             message_limiters: Arc::new(DashMap::new()),
+            history_request_limits: Arc::new(DashMap::new()),
             watchlist_manager: Arc::new(WatchlistManager::new()),
             server_options: Arc::new(self.server_options),
             cleanup_queue: self.cleanup_queue,
@@ -220,6 +256,62 @@ impl ConnectionHandlerBuilder {
             replay_buffer,
         }
     }
+}
+
+#[cfg(feature = "ai-transport")]
+fn start_ai_rollup_worker(
+    engine: Arc<RollupEngine>,
+    connection_manager: Arc<dyn ConnectionManager + Send + Sync>,
+    metrics: Option<Arc<dyn MetricsInterface + Send + Sync>>,
+    wheel_tick_ms: u64,
+) {
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    let tick_ms = wheel_tick_ms.max(1);
+    handle.spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_millis(tick_ms));
+        loop {
+            interval.tick().await;
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+                .unwrap_or_default();
+            let mut deliveries = engine.flush_due(now_ms);
+            deliveries.extend(engine.sweep_orphans(now_ms));
+            for delivery in deliveries {
+                if let Some(metrics) = metrics.as_ref() {
+                    metrics.mark_ai_rollup_append_delivered(&delivery.app_id);
+                    metrics.observe_ai_rollup_ratio(&delivery.app_id, delivery.coalesced as f64);
+                    metrics.observe_ai_rollup_flush_latency(
+                        &delivery.app_id,
+                        delivery.latency_ms as f64,
+                    );
+                    metrics.update_ai_rollup_active_streams(
+                        &delivery.app_id,
+                        engine.active_streams() as u64,
+                    );
+                }
+                if let Err(error) = connection_manager
+                    .send(
+                        &delivery.channel,
+                        delivery.message,
+                        None,
+                        &delivery.app_id,
+                        None,
+                    )
+                    .await
+                {
+                    warn!(
+                        app_id = %delivery.app_id,
+                        channel = %delivery.channel,
+                        error = %error,
+                        "failed to flush AI append rollup delivery"
+                    );
+                }
+            }
+        }
+    });
 }
 
 impl ConnectionHandler {
@@ -296,6 +388,7 @@ impl ConnectionHandler {
         protocol_version: ProtocolVersion,
         wire_format: WireFormat,
         echo_messages: bool,
+        initial_token: Option<String>,
     ) -> Result<()> {
         // Early validation and setup
         let app_config = match self.validate_and_get_app(&app_key).await {
@@ -335,7 +428,7 @@ impl ConnectionHandler {
                 // Send error message directly through the raw WebSocket before closing
                 // Create and send the error message
                 let error_message = PusherMessage::error(
-                    Error::OriginNotAllowed.close_code(),
+                    u32::from(Error::OriginNotAllowed.close_code()),
                     Error::OriginNotAllowed.to_string(),
                     None,
                 );
@@ -403,6 +496,36 @@ impl ConnectionHandler {
         self.setup_rate_limiting(&socket_id, &app_config).await?;
         self.setup_message_rate_limiting(&socket_id, &app_config)
             .await?;
+
+        if let Some(token) = initial_token.as_deref() {
+            let auth_result = async {
+                if protocol_version != ProtocolVersion::V2 {
+                    return Err(Error::Auth(
+                        "capability tokens require protocol V2".to_string(),
+                    ));
+                }
+                let context = self.validate_connection_token(&app_config, token).await?;
+                self.apply_connection_token(&socket_id, &app_config, context, false)
+                    .await
+            }
+            .await;
+
+            if let Err(error) = auth_result {
+                let _ = self
+                    .send_error(&app_config.id, &socket_id, &error, None)
+                    .await;
+                let _ = self
+                    .close_connection(
+                        &socket_id,
+                        &app_config,
+                        error.close_code(),
+                        &error.to_string(),
+                    )
+                    .await;
+                self.cleanup_socket(&socket_id, &app_config).await;
+                return Err(error);
+            }
+        }
 
         // Get the cancellation token so the reader loop can be cancelled
         // when the connection is cleaned up (e.g., ghost connection timeout)
@@ -687,6 +810,10 @@ impl ConnectionHandler {
                 self.handle_signin_request(socket_id, &app_config, request)
                     .await
             }
+            Some((CANONICAL_AUTH, _)) => {
+                self.handle_auth_token_refresh(socket_id, &app_config, &parsed)
+                    .await
+            }
             Some((CANONICAL_PONG, _)) => self.handle_pong(&app_config.id, socket_id).await,
             #[cfg(feature = "delta")]
             Some((CANONICAL_ENABLE_DELTA_COMPRESSION, _)) => {
@@ -700,9 +827,21 @@ impl ConnectionHandler {
             Some((CANONICAL_RESUME, _)) => {
                 self.handle_resume(socket_id, &app_config, &parsed).await
             }
+            Some((CANONICAL_CHANNEL_HISTORY, _)) => {
+                self.handle_channel_history_request(socket_id, &app_config, &parsed)
+                    .await
+            }
+            None if event_name == "channel_history" => {
+                self.handle_channel_history_request(socket_id, &app_config, &parsed)
+                    .await
+            }
             _ if event_name.starts_with(CLIENT_EVENT_PREFIX) => {
                 let request = self.parse_client_event(&parsed)?;
                 self.handle_client_event_request(socket_id, &app_config, request)
+                    .await
+            }
+            _ if is_ai_event(event_name) => {
+                self.handle_ai_event_request(socket_id, &app_config, parsed)
                     .await
             }
             _ => {

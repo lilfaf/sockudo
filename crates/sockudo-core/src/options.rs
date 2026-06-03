@@ -428,6 +428,7 @@ pub struct ServerOptions {
     pub event_name_filtering: EventNameFilteringConfig,
     pub versioned_messages: VersionedMessagesConfig,
     pub annotations: AnnotationsConfig,
+    pub ai_transport: AiTransportConfig,
     pub push: PushConfig,
     /// Timeout in milliseconds for each subsystem check in the `/up` health endpoint.
     /// Applies to adapter, cache, queue, and app manager checks independently.
@@ -1193,6 +1194,89 @@ pub struct VersionedMessagesConfig {
     /// Hard cap on rows deleted per purge tick across all loop iterations.
     /// Prevents a backlog of expired rows from monopolising a worker run.
     pub max_purge_per_tick: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AiTransportConfig {
+    pub enabled: bool,
+    pub channels: Vec<AiTransportChannelConfig>,
+    pub max_accumulated_message_bytes: usize,
+    pub max_appends_per_message: usize,
+    pub max_open_streaming_messages_per_channel: usize,
+    pub rollup: AiTransportRollupConfig,
+}
+
+impl AiTransportConfig {
+    #[inline]
+    pub fn matches_channel(&self, channel: &str) -> bool {
+        self.enabled
+            && self
+                .channels
+                .iter()
+                .any(|entry| entry.matches_channel(channel))
+    }
+}
+
+impl Default for AiTransportConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            channels: Vec::new(),
+            max_accumulated_message_bytes: 1024 * 1024,
+            max_appends_per_message: 4096,
+            max_open_streaming_messages_per_channel: 1024,
+            rollup: AiTransportRollupConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AiTransportRollupConfig {
+    pub enabled: bool,
+    pub default_window_ms: u64,
+    pub min_window_ms: u64,
+    pub max_window_ms: u64,
+    pub orphan_ttl_ms: u64,
+    pub wheel_tick_ms: u64,
+    pub shards: usize,
+}
+
+impl Default for AiTransportRollupConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            default_window_ms: 40,
+            min_window_ms: 0,
+            max_window_ms: 500,
+            orphan_ttl_ms: 1_000,
+            wheel_tick_ms: 5,
+            shards: 64,
+        }
+    }
+}
+
+impl AiTransportRollupConfig {
+    #[inline]
+    pub fn allows_window(&self, window_ms: u64) -> bool {
+        matches!(window_ms, 0 | 20 | 40 | 100 | 500)
+            && window_ms >= self.min_window_ms
+            && window_ms <= self.max_window_ms
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(default)]
+pub struct AiTransportChannelConfig {
+    pub prefix: String,
+}
+
+impl AiTransportChannelConfig {
+    #[inline]
+    pub fn matches_channel(&self, channel: &str) -> bool {
+        !self.prefix.is_empty() && channel.starts_with(&self.prefix)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -2081,6 +2165,7 @@ impl Default for ServerOptions {
             event_name_filtering: EventNameFilteringConfig::default(),
             versioned_messages: VersionedMessagesConfig::default(),
             annotations: AnnotationsConfig::default(),
+            ai_transport: AiTransportConfig::default(),
             push: PushConfig::default(),
             health_check_timeout_ms: 400,
         }
@@ -4126,6 +4211,48 @@ impl ServerOptions {
             "VERSIONED_MESSAGES_MAX_PURGE_PER_TICK",
             self.versioned_messages.max_purge_per_tick,
         );
+        self.ai_transport.enabled =
+            parse_bool_env("AI_TRANSPORT_ENABLED", self.ai_transport.enabled);
+        self.ai_transport.max_accumulated_message_bytes = parse_env::<usize>(
+            "AI_TRANSPORT_MAX_ACCUMULATED_MESSAGE_BYTES",
+            self.ai_transport.max_accumulated_message_bytes,
+        );
+        self.ai_transport.max_appends_per_message = parse_env::<usize>(
+            "AI_TRANSPORT_MAX_APPENDS_PER_MESSAGE",
+            self.ai_transport.max_appends_per_message,
+        );
+        self.ai_transport.max_open_streaming_messages_per_channel = parse_env::<usize>(
+            "AI_TRANSPORT_MAX_OPEN_STREAMING_MESSAGES_PER_CHANNEL",
+            self.ai_transport.max_open_streaming_messages_per_channel,
+        );
+        self.ai_transport.rollup.enabled = parse_bool_env(
+            "AI_TRANSPORT_ROLLUP_ENABLED",
+            self.ai_transport.rollup.enabled,
+        );
+        self.ai_transport.rollup.default_window_ms = parse_env::<u64>(
+            "AI_TRANSPORT_ROLLUP_DEFAULT_WINDOW_MS",
+            self.ai_transport.rollup.default_window_ms,
+        );
+        self.ai_transport.rollup.min_window_ms = parse_env::<u64>(
+            "AI_TRANSPORT_ROLLUP_MIN_WINDOW_MS",
+            self.ai_transport.rollup.min_window_ms,
+        );
+        self.ai_transport.rollup.max_window_ms = parse_env::<u64>(
+            "AI_TRANSPORT_ROLLUP_MAX_WINDOW_MS",
+            self.ai_transport.rollup.max_window_ms,
+        );
+        self.ai_transport.rollup.orphan_ttl_ms = parse_env::<u64>(
+            "AI_TRANSPORT_ROLLUP_ORPHAN_TTL_MS",
+            self.ai_transport.rollup.orphan_ttl_ms,
+        );
+        self.ai_transport.rollup.wheel_tick_ms = parse_env::<u64>(
+            "AI_TRANSPORT_ROLLUP_WHEEL_TICK_MS",
+            self.ai_transport.rollup.wheel_tick_ms,
+        );
+        self.ai_transport.rollup.shards = parse_env::<usize>(
+            "AI_TRANSPORT_ROLLUP_SHARDS",
+            self.ai_transport.rollup.shards,
+        );
         self.annotations.enabled = parse_bool_env("ANNOTATIONS_ENABLED", self.annotations.enabled);
 
         Ok(())
@@ -4193,6 +4320,48 @@ impl ServerOptions {
         }
         if self.annotations.enabled && !self.versioned_messages.enabled {
             return Err("annotations require versioned_messages.enabled".to_string());
+        }
+        if self.ai_transport.enabled {
+            if self.ai_transport.max_accumulated_message_bytes == 0 {
+                return Err(
+                    "ai_transport.max_accumulated_message_bytes must be greater than 0".to_string(),
+                );
+            }
+            if self.ai_transport.max_appends_per_message == 0 {
+                return Err(
+                    "ai_transport.max_appends_per_message must be greater than 0".to_string(),
+                );
+            }
+            if self.ai_transport.max_open_streaming_messages_per_channel == 0 {
+                return Err(
+                    "ai_transport.max_open_streaming_messages_per_channel must be greater than 0"
+                        .to_string(),
+                );
+            }
+            if !self
+                .ai_transport
+                .rollup
+                .allows_window(self.ai_transport.rollup.default_window_ms)
+            {
+                return Err(
+                    "ai_transport.rollup.default_window_ms must be one of 0, 20, 40, 100, 500 and within min/max".to_string(),
+                );
+            }
+            if self.ai_transport.rollup.min_window_ms > self.ai_transport.rollup.max_window_ms {
+                return Err(
+                    "ai_transport.rollup.min_window_ms must be less than or equal to max_window_ms"
+                        .to_string(),
+                );
+            }
+            if self.ai_transport.rollup.orphan_ttl_ms == 0 {
+                return Err("ai_transport.rollup.orphan_ttl_ms must be greater than 0".to_string());
+            }
+            if self.ai_transport.rollup.wheel_tick_ms == 0 {
+                return Err("ai_transport.rollup.wheel_tick_ms must be greater than 0".to_string());
+            }
+            if self.ai_transport.rollup.shards == 0 {
+                return Err("ai_transport.rollup.shards must be greater than 0".to_string());
+            }
         }
 
         if self.adapter.nats.presence_sync_chunk_size == Some(0) {

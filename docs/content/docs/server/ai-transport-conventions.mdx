@@ -1,0 +1,39 @@
+---
+title: AI Transport conventions
+description: Default-off AI Transport event and extras conventions for Protocol V2.
+---
+
+AI Transport support is additive and default-off. Enable it with the `ai-transport` Cargo feature and runtime `[ai_transport]` config, then scope validation to channel prefixes:
+
+```toml
+[ai_transport]
+enabled = true
+
+[[ai_transport.channels]]
+prefix = "private-ai-"
+```
+
+AI lifecycle events are plain channel events: `ai-input`, `ai-output`, `ai-turn-start`, `ai-turn-end`, and `ai-cancel`. Server-side validation applies only on enabled AI channels. WebSocket clients may publish `ai-input` and `ai-cancel` when their token allows `publish`; agent events require trusted server-side HTTP publish until an explicit agent token marker is specified.
+
+AI metadata is carried in the existing V2 `extras` envelope:
+
+```json
+{
+  "extras": {
+    "ai": {
+      "transport": {
+        "turn-id": "turn-1",
+        "status": "streaming",
+        "role": "assistant"
+      },
+      "codec": {
+        "content-type": "application/json"
+      }
+    }
+  }
+}
+```
+
+Each `transport` and `codec` tier is limited to 32 string keys. Keys must be at most 64 bytes and match `[a-z0-9-]+`; values must be at most 256 bytes. Transport keys are validated against the wire protocol registry. Codec keys are opaque but still bounded. Any `*-client-id` transport value on WebSocket publishes must match the verified signed-in client identity; trusted HTTP publishes are exempt.
+
+Existing `idempotency_key` behavior is unchanged. AI SDKs may additionally send `message_id` on HTTP publish for idempotent creates, and mutation requests may send `op_id` for no-op replay of append/update/delete operations. V2 publish and mutation acknowledgements expose `message_serial`, `history_serial`, `delivery_serial`, and `version_serial` when those serials are assigned.

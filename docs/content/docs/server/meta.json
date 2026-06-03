@@ -9,6 +9,8 @@
     "observability",
     "history-recovery",
     "webhooks",
-    "push-notifications"
+    "push-notifications",
+    "ai-transport-conventions",
+    "token-streaming-rollup"
   ]
 }

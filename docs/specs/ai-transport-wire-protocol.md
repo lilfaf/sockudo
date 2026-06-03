@@ -230,16 +230,16 @@ Existing HTTP mutation responses already include `version_serial` but not `histo
 
 ### Append Rollup
 
-Append rollup coalesces egress only. Persistence and version storage receive every append. The first append in a stream is delivered immediately. Subsequent appends are coalesced by `(app, channel, message_serial, subscriber fanout partition)` for a configured window: `0`, `20`, `40`, `100`, or `500` ms. Default is `40` ms. A terminal append/update with `status=complete|cancelled` flushes all pending rollups before the terminal event.
+Append rollup coalesces egress only. Persistence and version storage receive every append. The first append in a stream is delivered immediately. Subsequent appends are coalesced by `(app, channel, message_serial, fanout partition)` for a configured window: `0`, `20`, `40`, `100`, or `500` ms. Default is `40` ms. Sockudo v1 implements the fanout partition as node-local server-wide channel fanout because the adapter prepares one egress message for the channel rather than one frame per subscriber. A terminal append/update with `status=complete|cancelled` flushes pending state before the terminal event.
 
-Connection parameter: `append_rollup_window=<ms>`. Per-app config clamps allowed values. `0` disables rollup. Rate limiting counts original appends, not coalesced egress frames. Rollup output must reduce to the same mutable message state as the unrolled append stream.
+Connection parameter: `append_rollup_window=<ms>`. Per-app config clamps allowed values. `0` disables rollup. Current server v1 validates the connection parameter but uses `[ai_transport.rollup].default_window_ms` for node-local channel fanout. Rate limiting counts original mutation requests before rollup; egress metrics count coalesced deliveries. Rollup output must reduce to the same mutable message state as the unrolled append stream.
 
 ### UntilAttach And Client History
 
-Subscriptions capture `attach_serial` after authorization and before live delivery. Client history access is exposed through existing SDK `channel_history` semantics, extended for V2 client access. New WS frames:
+Subscriptions capture `attach_serial` after authorization and before live delivery. Client history access is exposed through existing SDK `channel_history` semantics, extended for V2 client access. The WS contract extends that existing action instead of adding a parallel history action:
 
-- Request event: `sockudo:history`
-- Response event: `sockudo:history_result`
+- Request event: `sockudo:channel_history` (the unprefixed `channel_history` action is also accepted for existing SDK plumbing)
+- Response event: `sockudo:channel_history`
 
 Request data:
 
@@ -257,7 +257,7 @@ Request data:
 }
 ```
 
-`limit` MUST be `1..=1000`. `until_attach=true` bounds `end_serial` to the subscription attach serial and gives gaplessness: history returns messages with `history_serial <= attach_serial`; live delivery continues with `history_serial > attach_serial`. Returned messages are aggregated via version-store latest projection, matching HTTP history substitution. Access requires `history` capability once capability tokens land. Existing rewind remains subscribe-time replay; client history is request/response pagination.
+`limit` MUST be `1..=1000` with default `100`; server policy may lower the effective page size. `direction` defaults to backwards/newest-first and accepts `backwards`, `reverse`, `newest_first`, `forwards`, `forward`, and `oldest_first`. `until_attach=true` bounds `end_serial` to the subscription attach serial and gives gaplessness: history returns messages with `history_serial <= attach_serial`; live delivery continues with `history_serial > attach_serial`. Returned messages are aggregated via version-store latest projection, matching HTTP history substitution. Access requires `history` capability once capability tokens land. Existing rewind remains subscribe-time replay; client history is request/response pagination.
 
 ### Capability Tokens
 
@@ -266,7 +266,7 @@ Capability tokens are V2-only JWTs signed with HS256. Header `kid` identifies th
 - `x-sockudo-capability`: JSON map from channel pattern to operations.
 - `x-sockudo-client-id`: verified client identity.
 - Standard `exp`, `iat`, optional `nbf`.
-- Optional `jti` for revocation.
+- Required `jti` for revocation.
 
 Operations: `publish`, `subscribe`, `history`, `presence`. Pattern rules are exact match, namespace wildcard `ns:*`, and global `*`; matching is case-sensitive. HMAC app-key auth remains supported and trusted. Token auth is additive and never weakens existing private/presence HMAC rules.
 
@@ -326,6 +326,7 @@ For SDK compatibility, use code `93002` with exact message `mutations not permit
 | Message payload | 64 KiB | 256 KiB per app | existing event payload limits |
 | Accumulated stream content | 1 MiB | per app clamp | `[ai_transport]` |
 | Appends per message | 4096 | per app clamp | `[ai_transport]` |
+| Open streaming messages per channel | 1024 | per app clamp | `[ai_transport]` |
 | AI transport keys per tier | 32 | 32 | fixed |
 | AI header key bytes | 64 | 64 | fixed |
 | AI header value bytes | 256 | 256 | fixed |
@@ -337,6 +338,16 @@ For SDK compatibility, use code `93002` with exact message `mutations not permit
 | Version retention | existing defaults | existing backend caps | `[versioned_messages]` |
 
 Do not introduce a second knob for an existing limit. AI-specific knobs only cover AI-only concepts: header registry, accumulated stream cap, append count cap, rollup clamp, and presence grace opt-in.
+
+### Versioned Message Aggregation Appendix
+
+Aggregation happens in the existing versioned-message subsystem. Each mutation writes a `StoredVersionRecord` through `VersionStore::append_version`; the latest aggregate is selected by `get_latest`, and channel projections use `latest_by_history`. The memory, PostgreSQL, and MySQL backends keep per-message version chains and return the highest `version_serial` as the visible aggregate. DynamoDB, ScyllaDB, and SurrealDB resolve latest pointers with backend-specific follow-up fetches; this is functionally equivalent but can be more read-amplified for large channel projections.
+
+Append aggregation currently folds string data at mutation application time (`VersionedMessage::apply_append`). The latest record therefore carries the full accumulated string, while individual append versions remain in the replay log. S2 caps now reject AI Transport appends before delivery serial reservation when the aggregate would exceed `[ai_transport].max_accumulated_message_bytes` or the append count would exceed `[ai_transport].max_appends_per_message`.
+
+Terminal stream status is persisted in the aggregate via `extras.ai.transport.status`. Append requests may carry `extras`; when present, those extras replace the previous aggregate extras so a terminal append with `status=complete|cancelled` remains visible through `get_latest`, HTTP message reads, and history substitution.
+
+Deletion is a tombstone-style latest version. History reads that encounter the original create row substitute the latest visible version, so deleted messages appear as `sockudo:message.delete` with the delete version's retained/cleared fields. Version retention and history retention are independent: if version-store purge removes the version chain while history rows remain, history substitution cannot materialize the latest aggregate and falls back to the retained raw history payload.
 
 ### Scale-Out Notes
 
@@ -358,8 +369,8 @@ AIT-S7 [EXISTS-VERIFY] Version chains reject mixed `history_serial`.
 AIT-S8 [EXISTS-VERIFY] Version chains reject duplicate `version_serial`.
 AIT-S9 [EXISTS-VERIFY] Version chains reject duplicate `delivery_serial`.
 AIT-S10 [EXISTS-VERIFY] Replay requires contiguous `delivery_serial` values.
-AIT-S11 [EXISTS-VERIFY] `get_latest` returns the max version for one message serial.
-AIT-S12 [EXISTS-VERIFY] `latest_by_history` returns one latest version per message in history order.
+AIT-S11 [VERIFIED] `get_latest` returns the max version for one message serial.
+AIT-S12 [VERIFIED] `latest_by_history` returns one latest version per message in history order.
 AIT-S13 [EXISTS-VERIFY] HTTP update response preserves current mutation response fields.
 AIT-S14 [EXISTS-VERIFY] HTTP delete response preserves current mutation response fields.
 AIT-S15 [EXISTS-VERIFY] HTTP append response preserves current mutation response fields.
@@ -379,7 +390,7 @@ AIT-S28 [EXISTS-VERIFY] History rejects inverted serial bounds.
 AIT-S29 [EXISTS-VERIFY] History rejects inverted time bounds.
 AIT-S30 [EXISTS-VERIFY] History cursor app/channel/direction/bounds must match request.
 AIT-S31 [EXISTS-VERIFY] HTTP history response includes continuity metadata.
-AIT-S32 [EXISTS-VERIFY] HTTP history substitutes latest versioned message where available.
+AIT-S32 [VERIFIED] HTTP history substitutes latest versioned message where available.
 AIT-S33 [EXISTS-VERIFY] Rewind is V2-only.
 AIT-S34 [EXISTS-VERIFY] Rewind requires enabled history rewind policy.
 AIT-S35 [EXISTS-VERIFY] Count rewind delivers oldest-to-newest after newest-first read.
@@ -416,11 +427,11 @@ AIT-S65 [NEW] Client-supplied `message_id` dedupes mutable create by app/channel
 AIT-S66 [NEW] Duplicate client-supplied `message_id` returns original serials without rebroadcast.
 AIT-S67 [NEW] Mutation `op_id` dedupes append/update/delete by app/channel/message/action/op.
 AIT-S68 [NEW] Mutation acks include optional `history_serial` and `delivery_serial`.
-AIT-S69 [NEW] Append rollup first append is immediate.
-AIT-S70 [NEW] Append rollup flushes before terminal status.
-AIT-S71 [NEW] Append rollup never drops persisted append versions.
-AIT-S72 [NEW] Rollup output reduces to the same state as unrolled appends.
-AIT-S73 [NEW] `append_rollup_window` accepts only 0, 20, 40, 100, or 500 ms.
+AIT-S69 [VERIFIED] Append rollup first append is immediate.
+AIT-S70 [VERIFIED] Append rollup flushes before terminal status.
+AIT-S71 [VERIFIED] Append rollup never drops persisted append versions.
+AIT-S72 [VERIFIED] Rollup output reduces to the same state as unrolled appends.
+AIT-S73 [VERIFIED] `append_rollup_window` accepts only 0, 20, 40, 100, or 500 ms.
 AIT-S74 [NEW] Subscription captures attach serial before live delivery.
 AIT-S75 [NEW] Client history `until_attach` returns history at or below attach serial.
 AIT-S76 [NEW] Live delivery after untilAttach starts above attach serial.
@@ -438,3 +449,7 @@ AIT-S87 [NEW] AI error codes 104000-104010 are emitted with documented names.
 AIT-S88 [NEW] Mutable-disabled AI channels emit 93002 and exact message string.
 AIT-S89 [NEW] V1 Pusher wire output remains byte-identical under default config.
 AIT-S90 [NEW] AI-enabled default-off profile preserves existing SDK tests.
+AIT-S91 [VERIFIED] AI append rejects aggregate content over `[ai_transport].max_accumulated_message_bytes` with 40009.
+AIT-S92 [VERIFIED] AI append rejects more than `[ai_transport].max_appends_per_message` appends with 40009.
+AIT-S93 [VERIFIED] AI create rejects more than `[ai_transport].max_open_streaming_messages_per_channel` open streaming messages with 40009.
+AIT-S94 [VERIFIED] Terminal append `extras.ai.transport.status=complete|cancelled` persists in the latest aggregate.

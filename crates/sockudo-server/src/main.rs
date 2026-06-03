@@ -66,7 +66,7 @@ use crate::http_handler::{
     channel_message_versions, channel_presence_history, channel_presence_history_reset,
     channel_presence_history_snapshot, channel_presence_history_state, channel_users, channels,
     delete_annotation, delete_message, events, fallback_404, live, metrics, publish_annotation,
-    stats, terminate_user_connections, up, update_message, usage,
+    revoke_capability_tokens, stats, terminate_user_connections, up, update_message, usage,
 };
 use crate::presence_history::create_presence_history_store;
 #[cfg(any(
@@ -3178,6 +3178,13 @@ impl SockudoServer {
             .route(
                 "/apps/{appId}/batch_events",
                 post(batch_events).route_layer(axum_middleware::from_fn_with_state(
+                    self.handler.clone(),
+                    pusher_api_auth_middleware,
+                )),
+            )
+            .route(
+                "/apps/{appId}/revocations",
+                post(revoke_capability_tokens).route_layer(axum_middleware::from_fn_with_state(
                     self.handler.clone(),
                     pusher_api_auth_middleware,
                 )),

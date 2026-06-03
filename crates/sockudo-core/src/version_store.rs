@@ -559,7 +559,8 @@ impl VersionStore for MemoryVersionStore {
 mod tests {
     use super::*;
     use crate::versioned_messages::{
-        FieldPatch, MessageAction, MessageFieldDelta, MessageSerial, VersionMetadata, VersionSerial,
+        FieldPatch, MessageAction, MessageAppend, MessageFieldDelta, MessageSerial,
+        VersionMetadata, VersionSerial,
     };
     use sockudo_protocol::messages::{MessageData, MessageExtras};
 
@@ -595,6 +596,7 @@ mod tests {
                     idempotency_key: None,
                     push: None,
                     echo: None,
+                    ai: None,
                 }),
             ),
         }
@@ -802,5 +804,201 @@ mod tests {
             .unwrap();
         assert_eq!(replay.len(), 1);
         assert_eq!(replay[0].version_serial().as_str(), "ver:1");
+    }
+
+    #[tokio::test]
+    async fn memory_store_aggregates_many_appends_for_latest_and_history_reads() {
+        let store = MemoryVersionStore::new();
+        let mut current = base_record("msg:1", 10, 1);
+        current.message.data = Some(MessageData::String("start".to_string()));
+        current.message.version.serial = VersionSerial::new("ver:00000000000000000001").unwrap();
+        store.append_version(current.clone()).await.unwrap();
+
+        for index in 0..128 {
+            let next = StoredVersionRecord {
+                message: current
+                    .message
+                    .apply_append(
+                        version(&format!("ver:{:020}", index + 2), index + 2),
+                        index as u64 + 2,
+                        MessageAppend {
+                            data_fragment: format!(":{index}"),
+                            extras: None,
+                        },
+                    )
+                    .unwrap(),
+                ..current.clone()
+            };
+            store.append_version(next.clone()).await.unwrap();
+            current = next;
+        }
+
+        let latest = store
+            .get_latest("app", "chat", &MessageSerial::new("msg:1").unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        let projected = store.latest_by_history("app", "chat").await.unwrap();
+
+        assert_eq!(projected.len(), 1);
+        assert_eq!(latest.version_serial(), projected[0].version_serial());
+        assert_eq!(
+            latest.message.data.unwrap().into_string(),
+            projected[0].message.data.clone().unwrap().into_string()
+        );
+        assert_eq!(
+            projected[0]
+                .message
+                .data
+                .clone()
+                .unwrap()
+                .into_string()
+                .unwrap(),
+            (0..128).fold("start".to_string(), |mut acc, index| {
+                acc.push_str(&format!(":{index}"));
+                acc
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_store_preserves_channel_delivery_order_under_concurrent_appends() {
+        let store = MemoryVersionStore::new();
+        for index in 0..100 {
+            let reservation = store
+                .reserve_delivery_position("app", "chat")
+                .await
+                .unwrap();
+            let mut create = base_record(
+                &format!("msg:{index}"),
+                index as u64 + 1,
+                reservation.delivery_serial,
+            );
+            create.message.version.serial = VersionSerial::new(format!("ver:{index}:0")).unwrap();
+            store.append_version(create).await.unwrap();
+        }
+
+        let handles = (0..100)
+            .map(|index| {
+                let store = store.clone();
+                tokio::spawn(async move {
+                    for append_index in 0..3 {
+                        let serial = MessageSerial::new(format!("msg:{index}")).unwrap();
+                        let current = store
+                            .get_latest("app", "chat", &serial)
+                            .await
+                            .unwrap()
+                            .unwrap();
+                        let reservation = store
+                            .reserve_delivery_position("app", "chat")
+                            .await
+                            .unwrap();
+                        let next = StoredVersionRecord {
+                            message: current
+                                .message
+                                .apply_append(
+                                    version(
+                                        &format!("ver:{index}:{}", append_index + 1),
+                                        append_index + 1,
+                                    ),
+                                    reservation.delivery_serial,
+                                    MessageAppend {
+                                        data_fragment: format!(":{append_index}"),
+                                        extras: None,
+                                    },
+                                )
+                                .unwrap(),
+                            ..current
+                        };
+                        store.append_version(next).await.unwrap();
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        let replay = store
+            .replay_after(VersionReplayRequest {
+                app_id: "app".to_string(),
+                channel: "chat".to_string(),
+                after_delivery_serial: 0,
+                limit: 1000,
+            })
+            .await
+            .unwrap();
+        assert_eq!(replay.len(), 400);
+        for pair in replay.windows(2) {
+            assert!(pair[0].delivery_serial() < pair[1].delivery_serial());
+        }
+    }
+
+    #[tokio::test]
+    async fn memory_store_replay_log_rebuilds_identical_aggregates() {
+        let source = MemoryVersionStore::new();
+        let first = base_record("msg:1", 10, 1);
+        let second = base_record("msg:2", 20, 2);
+        source.append_version(first.clone()).await.unwrap();
+        source.append_version(second.clone()).await.unwrap();
+
+        let first_append = StoredVersionRecord {
+            message: first
+                .message
+                .apply_append(
+                    version("ver:2", 2),
+                    3,
+                    MessageAppend {
+                        data_fragment: " world".to_string(),
+                        extras: None,
+                    },
+                )
+                .unwrap(),
+            ..first
+        };
+        let second_update = StoredVersionRecord {
+            message: second
+                .message
+                .apply_mutation(
+                    MessageAction::Update,
+                    version("ver:2", 2),
+                    4,
+                    MessageFieldDelta {
+                        data: FieldPatch::Replace(MessageData::String("patched".to_string())),
+                        ..Default::default()
+                    },
+                )
+                .unwrap(),
+            ..second
+        };
+        source.append_version(first_append).await.unwrap();
+        source.append_version(second_update).await.unwrap();
+
+        let log = source
+            .replay_after(VersionReplayRequest {
+                app_id: "app".to_string(),
+                channel: "chat".to_string(),
+                after_delivery_serial: 0,
+                limit: 100,
+            })
+            .await
+            .unwrap();
+        let rebuilt = MemoryVersionStore::new();
+        for record in log {
+            rebuilt.append_version(record).await.unwrap();
+        }
+
+        let source_latest = source.latest_by_history("app", "chat").await.unwrap();
+        let rebuilt_latest = rebuilt.latest_by_history("app", "chat").await.unwrap();
+        assert_eq!(source_latest.len(), rebuilt_latest.len());
+        for (left, right) in source_latest.iter().zip(rebuilt_latest.iter()) {
+            assert_eq!(left.message_serial(), right.message_serial());
+            assert_eq!(left.version_serial(), right.version_serial());
+            assert_eq!(
+                left.message.data.clone().unwrap().into_string(),
+                right.message.data.clone().unwrap().into_string()
+            );
+        }
     }
 }

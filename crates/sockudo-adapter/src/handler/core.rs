@@ -38,7 +38,7 @@ impl ConnectionHandler {
     ) -> Result<()> {
         let error_data = ErrorData {
             message: error.to_string(),
-            code: Some(error.close_code()),
+            code: Some(u32::from(error.close_code())),
         };
         let error_message =
             PusherMessage::error(error_data.code.unwrap_or(4000), error_data.message, channel);

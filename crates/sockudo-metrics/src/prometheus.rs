@@ -465,6 +465,11 @@ pub struct PrometheusMetricsDriver {
     idempotency_duplicates_total: CounterVec,
     // Ephemeral message metrics
     ephemeral_messages_total: CounterVec,
+    appends_received_total: CounterVec,
+    appends_delivered_total: CounterVec,
+    rollup_ratio: HistogramVec,
+    active_streams: GaugeVec,
+    flush_latency: HistogramVec,
     // Event name filter metrics
     event_filter_suppressed_total: CounterVec,
     // Echo control metrics
@@ -901,6 +906,53 @@ impl PrometheusMetricsDriver {
             Opts::new(
                 format!("{prefix}ephemeral_messages_total"),
                 "Total number of ephemeral messages delivered (V2 only)"
+            ),
+            &["app_id", "port"]
+        )
+        .unwrap();
+
+        let appends_received_total = register_counter_vec!(
+            Opts::new(
+                format!("{prefix}appends_received_total"),
+                "Total number of AI Transport message.append events received by rollup"
+            ),
+            &["app_id", "port"]
+        )
+        .unwrap();
+
+        let appends_delivered_total = register_counter_vec!(
+            Opts::new(
+                format!("{prefix}appends_delivered_total"),
+                "Total number of AI Transport append deliveries emitted by rollup"
+            ),
+            &["app_id", "port"]
+        )
+        .unwrap();
+
+        let rollup_ratio = register_histogram_vec!(
+            histogram_opts!(
+                format!("{prefix}rollup_ratio"),
+                "Number of input appends represented by one rollup output",
+                vec![1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0]
+            ),
+            &["app_id", "port"]
+        )
+        .unwrap();
+
+        let active_streams = register_gauge_vec!(
+            Opts::new(
+                format!("{prefix}active_streams"),
+                "Number of active AI Transport append rollup streams"
+            ),
+            &["app_id", "port"]
+        )
+        .unwrap();
+
+        let flush_latency = register_histogram_vec!(
+            histogram_opts!(
+                format!("{prefix}flush_latency"),
+                "AI Transport append rollup flush latency in milliseconds",
+                vec![0.0, 5.0, 20.0, 40.0, 100.0, 500.0, 1000.0]
             ),
             &["app_id", "port"]
         )
@@ -1350,6 +1402,11 @@ impl PrometheusMetricsDriver {
             idempotency_publish_total,
             idempotency_duplicates_total,
             ephemeral_messages_total,
+            appends_received_total,
+            appends_delivered_total,
+            rollup_ratio,
+            active_streams,
+            flush_latency,
             event_filter_suppressed_total,
             echo_suppressed_total,
             history_writes_total,
@@ -1984,6 +2041,36 @@ impl MetricsInterface for PrometheusMetricsDriver {
         self.versioned_history_substitution_total
             .with_label_values(&[app_id, &self.port.to_string(), result])
             .inc();
+    }
+
+    fn mark_ai_rollup_append_received(&self, app_id: &str) {
+        self.appends_received_total
+            .with_label_values(&[app_id, &self.port.to_string()])
+            .inc();
+    }
+
+    fn mark_ai_rollup_append_delivered(&self, app_id: &str) {
+        self.appends_delivered_total
+            .with_label_values(&[app_id, &self.port.to_string()])
+            .inc();
+    }
+
+    fn observe_ai_rollup_ratio(&self, app_id: &str, ratio: f64) {
+        self.rollup_ratio
+            .with_label_values(&[app_id, &self.port.to_string()])
+            .observe(ratio);
+    }
+
+    fn update_ai_rollup_active_streams(&self, app_id: &str, streams: u64) {
+        self.active_streams
+            .with_label_values(&[app_id, &self.port.to_string()])
+            .set(streams as f64);
+    }
+
+    fn observe_ai_rollup_flush_latency(&self, app_id: &str, latency_ms: f64) {
+        self.flush_latency
+            .with_label_values(&[app_id, &self.port.to_string()])
+            .observe(latency_ms);
     }
 
     fn mark_annotation_published(&self, channel: &str, annotation_type: &str) {

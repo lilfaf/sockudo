@@ -1675,6 +1675,10 @@ where
         }
     }
 
+    async fn get_all_connections(&self, app_id: &str) -> Result<Vec<SocketId>> {
+        Ok(self.local_adapter.get_all_connections(app_id).await)
+    }
+
     async fn get_namespaces(&self) -> Result<Vec<(String, Arc<Namespace>)>> {
         self.local_adapter.get_namespaces().await
     }

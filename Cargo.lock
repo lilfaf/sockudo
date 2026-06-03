@@ -8111,6 +8111,7 @@ dependencies = [
  "redis",
  "regex",
  "serde",
+ "sockudo-ai-transport",
  "sockudo-app",
  "sockudo-core",
  "sockudo-delta",
@@ -8124,6 +8125,16 @@ dependencies = [
  "tokio-util",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "sockudo-ai-transport"
+version = "4.5.1"
+dependencies = [
+ "ahash 0.8.12",
+ "bytes",
+ "criterion",
+ "sockudo-protocol",
 ]
 
 [[package]]
@@ -8181,6 +8192,7 @@ dependencies = [
  "futures-util",
  "hex",
  "hmac 0.13.0",
+ "jsonwebtoken",
  "md5",
  "memchr",
  "rand 0.9.4",
@@ -8257,6 +8269,7 @@ name = "sockudo-protocol"
 version = "4.5.1"
 dependencies = [
  "ahash 0.8.12",
+ "criterion",
  "prost 0.14.3",
  "rmp-serde",
  "serde",

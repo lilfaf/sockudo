@@ -12,6 +12,7 @@ use sockudo_adapter::channel_manager::ChannelManager;
 use sockudo_adapter::handler::annotations::{
     DeleteAnnotationRuntimeRequest, PublishAnnotationRuntimeRequest,
 };
+use sockudo_adapter::handler::auth_tokens::RevocationRequest as CapabilityRevocationRequest;
 use sockudo_core::annotations::{
     Annotation, AnnotationAction, AnnotationEventLookupRequest, AnnotationEventsRequest,
     AnnotationSerial, AnnotationType, RawAnnotationReplayRequest,
@@ -42,8 +43,11 @@ use sockudo_core::versioned_messages::{
 use sockudo_core::websocket::SocketId;
 use sockudo_protocol::constants::EVENT_NAME_MAX_LENGTH as DEFAULT_EVENT_NAME_MAX_LENGTH;
 use sockudo_protocol::messages::{
-    AnnotationEventAction, AnnotationEventData, ApiMessageData, BatchPusherApiMessage,
-    InfoQueryParser, MessageData, PusherApiMessage, PusherMessage,
+    AI_ERROR_EVENT_NOT_PERMITTED, AI_ERROR_HEADER_TOO_LARGE, AI_ERROR_INVALID_TRANSPORT_HEADER,
+    AI_ERROR_MUTABLE_NOT_PERMITTED, AI_ERROR_PAYLOAD_TOO_LARGE, AI_MESSAGE_ID_MAX_BYTES,
+    AiHeaderValidationError, AiPublishTrust, AnnotationEventAction, AnnotationEventData,
+    ApiMessageData, BatchPusherApiMessage, InfoQueryParser, MessageData, MessageExtras,
+    PusherApiMessage, PusherMessage, is_ai_agent_publish_event, is_ai_event,
 };
 use sockudo_protocol::versioned_messages::{
     AppendMessageRequest, DeleteMessageRequest, GetMessageResponse, ListMessageVersionsResponse,
@@ -96,6 +100,13 @@ pub enum AppError {
     PayloadTooLarge(String),
     #[error("Invalid input: {0}")]
     InvalidInput(String),
+    #[error("{message}")]
+    AiTransport {
+        status: StatusCode,
+        code: u32,
+        name: &'static str,
+        message: String,
+    },
     #[error("Feature disabled: {0}")]
     FeatureDisabled(String),
     #[error("Not implemented: {0}")]
@@ -104,8 +115,28 @@ pub enum AppError {
     NotFound(String),
 }
 
+#[derive(Debug, Deserialize)]
+pub struct RevokeCapabilityTokensRequest {
+    pub jti: Option<String>,
+    pub client_id: Option<String>,
+    pub expires_at: Option<i64>,
+    pub ttl_seconds: Option<u64>,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RevokeCapabilityTokensResponse {
+    pub revoked_jti: bool,
+    pub revoked_client_id: bool,
+    pub closed_connections: usize,
+}
+
 impl IntoResponse for AppError {
     fn into_response(self) -> AxumResponse {
+        let ai_registry_code = match &self {
+            AppError::AiTransport { code, .. } => Some(*code),
+            _ => None,
+        };
         let (status, code, msg) = match &self {
             AppError::AppNotFound(msg) => (StatusCode::NOT_FOUND, "app_not_found", msg.clone()),
             AppError::AppValidationFailed(msg) => (
@@ -159,6 +190,12 @@ impl IntoResponse for AppError {
                 msg.clone(),
             ),
             AppError::InvalidInput(msg) => (StatusCode::BAD_REQUEST, "invalid_input", msg.clone()),
+            AppError::AiTransport {
+                status,
+                code,
+                name,
+                message,
+            } => (*status, *name, message.clone()),
             AppError::FeatureDisabled(msg) => (
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "feature_disabled",
@@ -170,7 +207,11 @@ impl IntoResponse for AppError {
             AppError::NotFound(msg) => (StatusCode::NOT_FOUND, "not_found", msg.clone()),
         };
         error!(error.message = %self, status_code = %status, "HTTP request failed");
-        let error_message = json!({ "error": msg, "code": code, "status": status.as_u16() });
+        let error_message = if let Some(ai_code) = ai_registry_code {
+            json!({ "error": msg, "code": code, "ai_code": ai_code, "status": status.as_u16() })
+        } else {
+            json!({ "error": msg, "code": code, "status": status.as_u16() })
+        };
         let mut response = (status, Json(error_message)).into_response();
         match &self {
             AppError::TooManyRequests {
@@ -207,6 +248,23 @@ impl From<sockudo_core::error::Error> for AppError {
             sockudo_core::error::Error::Channel(s) => AppError::InvalidInput(s),
             sockudo_core::error::Error::InvalidMessageFormat(s) => AppError::InvalidInput(s),
             sockudo_core::error::Error::Auth(s) => AppError::ApiAuthFailed(s),
+            sockudo_core::error::Error::AiTransport {
+                code,
+                name,
+                message,
+            } => {
+                let status = match code {
+                    AI_ERROR_PAYLOAD_TOO_LARGE => StatusCode::PAYLOAD_TOO_LARGE,
+                    AI_ERROR_MUTABLE_NOT_PERMITTED => StatusCode::FORBIDDEN,
+                    _ => StatusCode::BAD_REQUEST,
+                };
+                AppError::AiTransport {
+                    status,
+                    code,
+                    name,
+                    message,
+                }
+            }
             _ => AppError::InternalError(err.to_string()),
         }
     }
@@ -613,6 +671,13 @@ fn require_versioned_messages_enabled(
     channel_name: &str,
 ) -> Result<(), AppError> {
     if !handler.server_options().versioned_messages.enabled {
+        if handler
+            .server_options()
+            .ai_transport
+            .matches_channel(channel_name)
+        {
+            return Err(mutable_not_permitted());
+        }
         return Err(AppError::FeatureDisabled(format!(
             "Versioned messages are disabled for channel '{channel_name}'"
         )));
@@ -788,6 +853,22 @@ async fn resolve_mutation_actor_identity(
         }
 
         let capabilities = connection.get_connection_capabilities().await;
+        if connection.get_token_auth_context().await.is_some()
+            && capabilities
+                .as_ref()
+                .is_none_or(|capabilities| !capabilities.allows_publish(channel))
+        {
+            if let Some(metrics) = handler.metrics() {
+                metrics.mark_versioned_message_mutation(app_id, &action_metric, "auth_failed");
+            }
+            warn!(
+                app_id = %app_id,
+                channel = %channel,
+                action = %kind.as_verb(),
+                "Denied versioned message mutation because token lacks publish capability"
+            );
+            return Err(mutable_not_permitted());
+        }
         if let Err(err) = authorize_message_mutation(MutationAuthorizationRequest {
             channel,
             kind,
@@ -807,7 +888,8 @@ async fn resolve_mutation_actor_identity(
                 actor_client_id = ?actor_client_id,
                 "Denied versioned message mutation authorization"
             );
-            return Err(AppError::from(err));
+            let _ = err;
+            return Err(mutable_not_permitted());
         }
 
         return Ok(actor_client_id.or_else(|| requested_client_id.map(str::to_string)));
@@ -1219,8 +1301,14 @@ pub async fn stats(
     ))
 }
 
+#[derive(Clone, Copy)]
+struct MessageIdIdempotencyContext {
+    enabled: bool,
+    ttl_seconds: u64,
+}
+
 /// Helper to process a single event and return channel info if requested
-#[instrument(skip(handler, event_data, app, start_time_ms), fields(app_id = app.id, event_name = field::Empty))]
+#[instrument(skip(handler, event_data, app, start_time_ms, message_id_idempotency), fields(app_id = app.id, event_name = field::Empty))]
 async fn process_single_event_parallel(
     handler: &Arc<ConnectionHandler>,
     app: &App,
@@ -1228,6 +1316,7 @@ async fn process_single_event_parallel(
     collect_info: bool,
     start_time_ms: Option<f64>,
     idempotency_key: Option<String>,
+    message_id_idempotency: MessageIdIdempotencyContext,
 ) -> Result<HashMap<String, Value>, AppError> {
     let PusherApiMessage {
         name,
@@ -1239,6 +1328,7 @@ async fn process_single_event_parallel(
         tags,
         delta: delta_flag,
         idempotency_key: _,
+        message_id,
         extras,
     } = event_data;
 
@@ -1312,12 +1402,88 @@ async fn process_single_event_parallel(
             .map(|h| h.into_iter().collect());
         let delta_flag_for_task = delta_flag;
         let idempotency_key_for_task = idempotency_key.clone();
+        let message_id_for_task = message_id.clone();
         let extras_for_task = extras.clone();
 
         async move {
             debug!(channel = %target_channel_str, "Processing channel for event (parallel task)");
 
             validate_channel_name(app, &target_channel_str).await?;
+            validate_ai_http_publish(
+                handler_clone.as_ref(),
+                app,
+                &target_channel_str,
+                event_name_for_task.as_str(),
+                message_id_for_task.as_deref(),
+                extras_for_task.as_ref(),
+            )
+            .await?;
+
+            if let Some(message_id) = message_id_for_task.as_deref()
+                && message_id_idempotency.enabled
+            {
+                let cache_key = message_id_cache_key(&app.id, &target_channel_str, message_id);
+                match handler_clone.cache_manager().get(&cache_key).await {
+                    Ok(Some(cached)) if cached != "__processing__" => {
+                        if let Some(metrics) = handler_clone.metrics() {
+                            metrics.mark_idempotency_duplicate(&app.id);
+                        }
+                        let cached_ack = sonic_rs::from_str(&cached).unwrap_or_else(|_| json!({}));
+                        return Ok(Some((target_channel_str.clone(), cached_ack)));
+                    }
+                    Ok(Some(_)) => {
+                        if let Some(cached_ack) =
+                            wait_for_message_id_ack(handler_clone.as_ref(), &cache_key).await
+                        {
+                            if let Some(metrics) = handler_clone.metrics() {
+                                metrics.mark_idempotency_duplicate(&app.id);
+                            }
+                            return Ok(Some((target_channel_str.clone(), cached_ack)));
+                        }
+                        return Err(AppError::Backpressure {
+                            message: "message_id duplicate is still processing".to_string(),
+                            retry_after_seconds: 1,
+                        });
+                    }
+                    Ok(None) => {
+                        if let Some(metrics) = handler_clone.metrics() {
+                            metrics.mark_idempotency_publish(&app.id);
+                        }
+                        match handler_clone
+                            .cache_manager()
+                            .set_if_not_exists(
+                                &cache_key,
+                                "__processing__",
+                                message_id_idempotency.ttl_seconds,
+                            )
+                            .await
+                        {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                if let Some(cached_ack) =
+                                    wait_for_message_id_ack(handler_clone.as_ref(), &cache_key)
+                                        .await
+                                {
+                                    if let Some(metrics) = handler_clone.metrics() {
+                                        metrics.mark_idempotency_duplicate(&app.id);
+                                    }
+                                    return Ok(Some((target_channel_str.clone(), cached_ack)));
+                                }
+                                return Err(AppError::Backpressure {
+                                    message: "message_id duplicate is still processing".to_string(),
+                                    retry_after_seconds: 1,
+                                });
+                            }
+                            Err(e) => {
+                                warn!(message_id = %message_id, error = %e, "Failed to claim message_id idempotency key, proceeding without dedup");
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!(message_id = %message_id, error = %e, "Failed to check message_id idempotency cache, proceeding without dedup");
+                    }
+                }
+            }
 
             let message_data = match payload_for_task {
                 Some(ApiMessageData::String(s)) => {
@@ -1338,9 +1504,11 @@ async fn process_single_event_parallel(
                 sequence: None,
                 conflation_key: None,
                 message_id: if handler_clone.server_options().connection_recovery.enabled {
-                    Some(uuid::Uuid::new_v4().to_string())
+                    message_id_for_task
+                        .clone()
+                        .or_else(|| Some(uuid::Uuid::new_v4().to_string()))
                 } else {
-                    None
+                    message_id_for_task.clone()
                 },
                 stream_id: None,
                 serial: None,
@@ -1351,43 +1519,29 @@ async fn process_single_event_parallel(
             };
             let timestamp_ms = start_time_ms;
 
-            match delta_flag_for_task {
-                Some(true) => {
-                    handler_clone.broadcast_to_channel_with_timing(
-                        app,
-                        &target_channel_str,
-                        _message_to_send,
-                        socket_id_for_task.as_ref(),
-                        timestamp_ms,
-                    )
-                    .await?;
-                }
-                Some(false) => {
-                    handler_clone.broadcast_to_channel_force_full(
-                        app,
-                        &target_channel_str,
-                        _message_to_send,
-                        socket_id_for_task.as_ref(),
-                        timestamp_ms,
-                    )
-                    .await?;
-                }
-                None => {
-                    handler_clone.broadcast_to_channel_with_timing(
-                        app,
-                        &target_channel_str,
-                        _message_to_send,
-                        socket_id_for_task.as_ref(),
-                        timestamp_ms,
-                    )
-                    .await?;
-                }
-            }
+            let force_full = matches!(delta_flag_for_task, Some(false));
+            let publish_ack = handler_clone
+                .publish_to_channel_with_timing(
+                    app,
+                    &target_channel_str,
+                    _message_to_send,
+                    socket_id_for_task.as_ref(),
+                    timestamp_ms,
+                    force_full,
+                )
+                .await?;
 
             let mut collected_channel_specific_info: Option<(String, Value)> = None;
             if collect_info {
                 let is_presence = target_channel_str.starts_with("presence-");
                 let mut current_channel_info_map = sonic_rs::Object::new();
+
+                if let Some(ack) = publish_ack {
+                    current_channel_info_map.insert("message_serial", json!(ack.message_serial));
+                    current_channel_info_map.insert("history_serial", json!(ack.history_serial));
+                    current_channel_info_map.insert("delivery_serial", json!(ack.delivery_serial));
+                    current_channel_info_map.insert("version_serial", json!(ack.version_serial));
+                }
 
                 if is_presence && info_for_task.as_deref().is_some_and(|s| s.contains("user_count")) {
                     match ChannelManager::get_channel_members(
@@ -1422,6 +1576,17 @@ async fn process_single_event_parallel(
                 }
 
                 if !current_channel_info_map.is_empty() {
+                    if let Some(message_id) = message_id_for_task.as_deref()
+                        && message_id_idempotency.enabled
+                        && let Ok(serialized) =
+                            sonic_rs::to_string(&current_channel_info_map.clone().into_value())
+                    {
+                        let cache_key = message_id_cache_key(&app.id, &target_channel_str, message_id);
+                        let _ = handler_clone
+                            .cache_manager()
+                            .set(&cache_key, &serialized, message_id_idempotency.ttl_seconds)
+                            .await;
+                    }
                     collected_channel_specific_info = Some((
                         target_channel_str.clone(),
                         current_channel_info_map.into_value(),
@@ -1518,6 +1683,242 @@ fn resolve_idempotency_key(
 /// Build the cache key used for idempotency storage.
 fn idempotency_cache_key(app_id: &str, key: &str) -> String {
     format!("app:{}:idempotency:{}", app_id, key)
+}
+
+async fn wait_for_message_id_ack(handler: &ConnectionHandler, cache_key: &str) -> Option<Value> {
+    for _ in 0..6 {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        if let Ok(Some(cached)) = handler.cache_manager().get(cache_key).await
+            && cached != "__processing__"
+        {
+            return Some(sonic_rs::from_str(&cached).unwrap_or_else(|_| json!({})));
+        }
+    }
+    None
+}
+
+fn message_id_cache_key(app_id: &str, channel: &str, message_id: &str) -> String {
+    format!("app:{app_id}:channel:{channel}:message_id:{message_id}")
+}
+
+fn mutation_op_cache_key(
+    app_id: &str,
+    channel: &str,
+    message_serial: &str,
+    action: ProtocolMessageAction,
+    op_id: &str,
+) -> String {
+    format!(
+        "app:{app_id}:channel:{channel}:message:{message_serial}:action:{}:op_id:{op_id}",
+        action.as_str()
+    )
+}
+
+fn idempotency_ttl(app: &App, handler: &ConnectionHandler) -> u64 {
+    app.resolved_idempotency(&handler.server_options().idempotency)
+        .ttl_seconds
+}
+
+fn ai_validation_app_error(error: AiHeaderValidationError) -> AppError {
+    let status = match error.code {
+        AI_ERROR_HEADER_TOO_LARGE => StatusCode::PAYLOAD_TOO_LARGE,
+        _ => StatusCode::BAD_REQUEST,
+    };
+
+    AppError::AiTransport {
+        status,
+        code: error.code,
+        name: error.name,
+        message: error.message,
+    }
+}
+
+fn ai_payload_too_large(message: impl Into<String>) -> AppError {
+    AppError::AiTransport {
+        status: StatusCode::PAYLOAD_TOO_LARGE,
+        code: AI_ERROR_PAYLOAD_TOO_LARGE,
+        name: "payload_too_large",
+        message: message.into(),
+    }
+}
+
+fn mutable_not_permitted() -> AppError {
+    AppError::AiTransport {
+        status: StatusCode::FORBIDDEN,
+        code: AI_ERROR_MUTABLE_NOT_PERMITTED,
+        name: "mutable_not_permitted",
+        message: "mutations not permitted on this channel".to_string(),
+    }
+}
+
+fn message_data_bytes(data: Option<&MessageData>) -> Result<usize, AppError> {
+    match data {
+        None => Ok(0),
+        Some(MessageData::String(value)) => Ok(value.len()),
+        Some(other) => sonic_rs::to_vec(other)
+            .map(|bytes| bytes.len())
+            .map_err(AppError::from),
+    }
+}
+
+fn ai_transport_applies(handler: &ConnectionHandler, channel: &str) -> bool {
+    handler
+        .server_options()
+        .ai_transport
+        .matches_channel(channel)
+}
+
+async fn validate_ai_append_caps(
+    handler: &ConnectionHandler,
+    current: &StoredVersionRecord,
+    append_bytes: usize,
+) -> Result<(), AppError> {
+    if !ai_transport_applies(handler, &current.channel) {
+        return Ok(());
+    }
+
+    let config = &handler.server_options().ai_transport;
+    let current_bytes = message_data_bytes(current.message.data.as_ref())?;
+    let next_bytes = current_bytes.saturating_add(append_bytes);
+    if next_bytes > config.max_accumulated_message_bytes {
+        return Err(ai_payload_too_large(format!(
+            "accumulated message content exceeds {} bytes",
+            config.max_accumulated_message_bytes
+        )));
+    }
+
+    let page = handler
+        .version_store()
+        .get_versions(VersionStoreReadRequest {
+            app_id: current.app_id.clone(),
+            channel: current.channel.clone(),
+            message_serial: current.message_serial().clone(),
+            direction: VersionStoreDirection::OldestFirst,
+            limit: config.max_appends_per_message.saturating_add(1),
+            cursor: None,
+        })
+        .await?;
+    let append_count = page
+        .items
+        .iter()
+        .filter(|record| record.message.action == CoreMessageAction::Append)
+        .count();
+    if append_count >= config.max_appends_per_message {
+        return Err(ai_payload_too_large(format!(
+            "message append count exceeds {}",
+            config.max_appends_per_message
+        )));
+    }
+
+    Ok(())
+}
+
+fn validate_ai_update_caps(
+    handler: &ConnectionHandler,
+    channel: &str,
+    data: Option<&MessageData>,
+) -> Result<(), AppError> {
+    if !ai_transport_applies(handler, channel) {
+        return Ok(());
+    }
+    let max_bytes = handler
+        .server_options()
+        .ai_transport
+        .max_accumulated_message_bytes;
+    let bytes = message_data_bytes(data)?;
+    if bytes > max_bytes {
+        return Err(ai_payload_too_large(format!(
+            "accumulated message content exceeds {max_bytes} bytes"
+        )));
+    }
+    Ok(())
+}
+
+async fn validate_ai_http_publish(
+    handler: &ConnectionHandler,
+    app: &App,
+    channel: &str,
+    event_name: &str,
+    message_id: Option<&str>,
+    extras: Option<&MessageExtras>,
+) -> Result<(), AppError> {
+    let ai_channel = handler
+        .server_options()
+        .ai_transport
+        .matches_channel(channel);
+    let has_ai_headers = extras.and_then(|extras| extras.ai.as_ref()).is_some();
+    if !ai_channel && !has_ai_headers && !is_ai_event(event_name) {
+        return Ok(());
+    }
+
+    if !ai_channel {
+        return Err(AppError::AiTransport {
+            status: StatusCode::FORBIDDEN,
+            code: AI_ERROR_EVENT_NOT_PERMITTED,
+            name: "ai_event_not_permitted",
+            message: "AI Transport is not enabled for this channel".to_string(),
+        });
+    }
+
+    if is_ai_event(event_name)
+        && let Some(metrics) = handler.metrics()
+    {
+        metrics.mark_ai_transport_validated(&app.id, event_name);
+    }
+
+    if is_ai_agent_publish_event(event_name) {
+        // HTTP API requests are signed with the app secret before reaching this handler.
+    }
+
+    if let Some(message_id) = message_id {
+        if message_id.is_empty() {
+            return Err(AppError::AiTransport {
+                status: StatusCode::BAD_REQUEST,
+                code: AI_ERROR_INVALID_TRANSPORT_HEADER,
+                name: "ai_invalid_transport_header",
+                message: "message_id must not be empty".to_string(),
+            });
+        }
+        if message_id.len() > AI_MESSAGE_ID_MAX_BYTES {
+            return Err(AppError::AiTransport {
+                status: StatusCode::BAD_REQUEST,
+                code: AI_ERROR_HEADER_TOO_LARGE,
+                name: "ai_header_too_large",
+                message: format!("message_id exceeds {AI_MESSAGE_ID_MAX_BYTES} bytes"),
+            });
+        }
+    }
+
+    if let Some(extras) = extras {
+        extras
+            .validate_ai_headers()
+            .map_err(ai_validation_app_error)?;
+        let probe = PusherMessage {
+            event: Some(event_name.to_string()),
+            channel: Some(channel.to_string()),
+            data: None,
+            name: None,
+            user_id: None,
+            tags: None,
+            sequence: None,
+            conflation_key: None,
+            message_id: message_id.map(ToOwned::to_owned),
+            stream_id: None,
+            serial: None,
+            idempotency_key: None,
+            extras: Some(extras.clone()),
+            delta_sequence: None,
+            delta_conflation_key: None,
+        };
+        sockudo_adapter::handler::validation::validate_ai_client_id_headers(
+            &probe,
+            None,
+            AiPublishTrust::TrustedApp,
+        )
+        .map_err(ai_validation_app_error)?;
+    }
+
+    Ok(())
 }
 
 /// Merge per-app idempotency overrides with the global config.
@@ -1653,7 +2054,9 @@ pub async fn events(
         }
     }
 
-    let need_channel_info = event_payload.info.is_some();
+    let need_channel_info = event_payload.info.is_some()
+        || event_payload.message_id.is_some()
+        || event_payload.name.as_deref().is_some_and(is_ai_event);
 
     #[cfg(feature = "push")]
     if let Some(extras_push) = event_payload
@@ -1692,6 +2095,10 @@ pub async fn events(
         need_channel_info,
         Some(start_time_ms),
         idempotency_key.clone(),
+        MessageIdIdempotencyContext {
+            enabled: idempotency_config.enabled,
+            ttl_seconds: idempotency_config.ttl_seconds,
+        },
     )
     .await?;
 
@@ -1838,7 +2245,13 @@ pub async fn batch_events(
     let mut any_message_requests_info = false;
 
     for single_event_message in &batch_events_vec {
-        if single_event_message.info.is_some() {
+        if single_event_message.info.is_some()
+            || single_event_message.message_id.is_some()
+            || single_event_message
+                .name
+                .as_deref()
+                .is_some_and(is_ai_event)
+        {
             any_message_requests_info = true;
             break;
         }
@@ -1866,7 +2279,12 @@ pub async fn batch_events(
             }
         }
 
-        let should_collect_info_for_this_event = single_event_message.info.is_some();
+        let should_collect_info_for_this_event = single_event_message.info.is_some()
+            || single_event_message.message_id.is_some()
+            || single_event_message
+                .name
+                .as_deref()
+                .is_some_and(is_ai_event);
         #[cfg(feature = "push")]
         if let Some(extras_push) = single_event_message
             .extras
@@ -1904,6 +2322,10 @@ pub async fn batch_events(
             should_collect_info_for_this_event,
             Some(start_time_ms),
             single_event_message.idempotency_key.clone(),
+            MessageIdIdempotencyContext {
+                enabled: idempotency_config.enabled,
+                ttl_seconds: idempotency_config.ttl_seconds,
+            },
         )
         .await?;
 
@@ -2154,8 +2576,38 @@ pub async fn update_message(
         request.socket_id.as_deref(),
     )
     .await?;
+    if let Some(op_id) = request.op_id.as_deref() {
+        if op_id.is_empty() || op_id.len() > AI_MESSAGE_ID_MAX_BYTES {
+            return Err(AppError::InvalidInput(format!(
+                "op_id must be 1..={AI_MESSAGE_ID_MAX_BYTES} bytes"
+            )));
+        }
+        let cache_key = mutation_op_cache_key(
+            &path.app_id,
+            &path.channel_name,
+            &path.message_serial,
+            ProtocolMessageAction::Update,
+            op_id,
+        );
+        if handler.cache_manager().get(&cache_key).await?.is_some() {
+            let payload = MutationResponse {
+                channel: path.channel_name,
+                message_serial: path.message_serial,
+                action: ProtocolMessageAction::Update,
+                accepted: true,
+                version_serial: Some(current.version_serial().as_str().to_string()),
+                history_serial: Some(current.history_serial()),
+                delivery_serial: Some(current.delivery_serial()),
+                status: "duplicate".to_string(),
+            };
+            return Ok((StatusCode::OK, Json(payload)).into_response());
+        }
+    }
     if let Some(metrics) = handler.metrics() {
         metrics.mark_versioned_message_mutation(&path.app_id, "message.update", "applied");
+    }
+    if request.data.is_some() {
+        validate_ai_update_caps(&handler, &path.channel_name, request.data.as_ref())?;
     }
 
     let reservation = handler
@@ -2209,8 +2661,23 @@ pub async fn update_message(
         action: ProtocolMessageAction::Update,
         accepted: true,
         version_serial: Some(updated.version_serial().as_str().to_string()),
+        history_serial: Some(updated.history_serial()),
+        delivery_serial: Some(updated.delivery_serial()),
         status: "applied".to_string(),
     };
+    if let Some(op_id) = request.op_id.as_deref() {
+        let cache_key = mutation_op_cache_key(
+            &path.app_id,
+            &payload.channel,
+            &payload.message_serial,
+            ProtocolMessageAction::Update,
+            op_id,
+        );
+        let _ = handler
+            .cache_manager()
+            .set(&cache_key, "1", idempotency_ttl(&app, &handler))
+            .await;
+    }
     Ok((StatusCode::OK, Json(payload)).into_response())
 }
 
@@ -2266,6 +2733,33 @@ pub async fn delete_message(
         request.socket_id.as_deref(),
     )
     .await?;
+    if let Some(op_id) = request.op_id.as_deref() {
+        if op_id.is_empty() || op_id.len() > AI_MESSAGE_ID_MAX_BYTES {
+            return Err(AppError::InvalidInput(format!(
+                "op_id must be 1..={AI_MESSAGE_ID_MAX_BYTES} bytes"
+            )));
+        }
+        let cache_key = mutation_op_cache_key(
+            &path.app_id,
+            &path.channel_name,
+            &path.message_serial,
+            ProtocolMessageAction::Delete,
+            op_id,
+        );
+        if handler.cache_manager().get(&cache_key).await?.is_some() {
+            let payload = MutationResponse {
+                channel: path.channel_name,
+                message_serial: path.message_serial,
+                action: ProtocolMessageAction::Delete,
+                accepted: true,
+                version_serial: Some(current.version_serial().as_str().to_string()),
+                history_serial: Some(current.history_serial()),
+                delivery_serial: Some(current.delivery_serial()),
+                status: "duplicate".to_string(),
+            };
+            return Ok((StatusCode::OK, Json(payload)).into_response());
+        }
+    }
     if let Some(metrics) = handler.metrics() {
         metrics.mark_versioned_message_mutation(&path.app_id, "message.delete", "applied");
     }
@@ -2321,8 +2815,23 @@ pub async fn delete_message(
         action: ProtocolMessageAction::Delete,
         accepted: true,
         version_serial: Some(deleted.version_serial().as_str().to_string()),
+        history_serial: Some(deleted.history_serial()),
+        delivery_serial: Some(deleted.delivery_serial()),
         status: "applied".to_string(),
     };
+    if let Some(op_id) = request.op_id.as_deref() {
+        let cache_key = mutation_op_cache_key(
+            &path.app_id,
+            &payload.channel,
+            &payload.message_serial,
+            ProtocolMessageAction::Delete,
+            op_id,
+        );
+        let _ = handler
+            .cache_manager()
+            .set(&cache_key, "1", idempotency_ttl(&app, &handler))
+            .await;
+    }
     Ok((StatusCode::OK, Json(payload)).into_response())
 }
 
@@ -2378,9 +2887,37 @@ pub async fn append_message(
         request.socket_id.as_deref(),
     )
     .await?;
+    if let Some(op_id) = request.op_id.as_deref() {
+        if op_id.is_empty() || op_id.len() > AI_MESSAGE_ID_MAX_BYTES {
+            return Err(AppError::InvalidInput(format!(
+                "op_id must be 1..={AI_MESSAGE_ID_MAX_BYTES} bytes"
+            )));
+        }
+        let cache_key = mutation_op_cache_key(
+            &path.app_id,
+            &path.channel_name,
+            &path.message_serial,
+            ProtocolMessageAction::Append,
+            op_id,
+        );
+        if handler.cache_manager().get(&cache_key).await?.is_some() {
+            let payload = MutationResponse {
+                channel: path.channel_name,
+                message_serial: path.message_serial,
+                action: ProtocolMessageAction::Append,
+                accepted: true,
+                version_serial: Some(current.version_serial().as_str().to_string()),
+                history_serial: Some(current.history_serial()),
+                delivery_serial: Some(current.delivery_serial()),
+                status: "duplicate".to_string(),
+            };
+            return Ok((StatusCode::OK, Json(payload)).into_response());
+        }
+    }
     if let Some(metrics) = handler.metrics() {
         metrics.mark_versioned_message_mutation(&path.app_id, "message.append", "applied");
     }
+    validate_ai_append_caps(&handler, &current, request.data.len()).await?;
 
     let reservation = handler
         .version_store()
@@ -2398,6 +2935,7 @@ pub async fn append_message(
             reservation.delivery_serial,
             MessageAppend {
                 data_fragment: request.data.clone(),
+                extras: request.extras.clone(),
             },
         )
         .map_err(AppError::from)?;
@@ -2434,8 +2972,23 @@ pub async fn append_message(
         action: ProtocolMessageAction::Append,
         accepted: true,
         version_serial: Some(appended.version_serial().as_str().to_string()),
+        history_serial: Some(appended.history_serial()),
+        delivery_serial: Some(appended.delivery_serial()),
         status: "applied".to_string(),
     };
+    if let Some(op_id) = request.op_id.as_deref() {
+        let cache_key = mutation_op_cache_key(
+            &path.app_id,
+            &payload.channel,
+            &payload.message_serial,
+            ProtocolMessageAction::Append,
+            op_id,
+        );
+        let _ = handler
+            .cache_manager()
+            .set(&cache_key, "1", idempotency_ttl(&app, &handler))
+            .await;
+    }
     Ok((StatusCode::OK, Json(payload)).into_response())
 }
 
@@ -3346,6 +3899,37 @@ pub async fn channel_history_state(
     Ok((StatusCode::OK, Json(response_payload)))
 }
 
+/// POST /apps/{app_id}/revocations
+#[instrument(skip(handler, body), fields(app_id = %app_id))]
+pub async fn revoke_capability_tokens(
+    Path(app_id): Path<String>,
+    Extension(app): Extension<App>,
+    State(handler): State<Arc<ConnectionHandler>>,
+    Json(body): Json<RevokeCapabilityTokensRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let result = handler
+        .revoke_capability_tokens(
+            &app,
+            CapabilityRevocationRequest {
+                jti: body.jti,
+                client_id: body.client_id,
+                expires_at: body.expires_at,
+                ttl_seconds: body.ttl_seconds,
+                reason: body.reason,
+            },
+        )
+        .await?;
+
+    let response = RevokeCapabilityTokensResponse {
+        revoked_jti: result.revoked_jti,
+        revoked_client_id: result.revoked_client_id,
+        closed_connections: result.closed_connections,
+    };
+    let response_json_bytes = sonic_rs::to_vec(&response)?;
+    record_api_metrics(&handler, &app_id, 0, response_json_bytes.len()).await;
+    Ok((StatusCode::OK, Json(response)))
+}
+
 /// POST /apps/{app_id}/channels/{channel_name}/history/reset
 #[instrument(skip(handler, body), fields(app_id = %app_id, channel = %channel_name))]
 pub async fn channel_history_reset(
@@ -3919,6 +4503,44 @@ mod tests {
     ) -> Arc<ConnectionHandler> {
         let (handler, _, _) = test_versioned_handler_harness(max_page_size, version_store);
         handler
+    }
+
+    fn test_ai_versioned_handler_with_store(
+        max_page_size: usize,
+        version_store: Arc<dyn VersionStore + Send + Sync>,
+        max_accumulated_message_bytes: usize,
+        max_appends_per_message: usize,
+        max_open_streaming_messages_per_channel: usize,
+    ) -> Arc<ConnectionHandler> {
+        let app_manager = Arc::new(MemoryAppManager::new()) as Arc<dyn AppManager + Send + Sync>;
+        let adapter = Arc::new(LocalAdapter::new())
+            as Arc<dyn sockudo_adapter::ConnectionManager + Send + Sync>;
+        let cache = Arc::new(MemoryCacheManager::new(
+            "test".to_string(),
+            MemoryCacheOptions::default(),
+        ));
+
+        let mut options = sockudo_core::options::ServerOptions::default();
+        options.versioned_messages.enabled = true;
+        options.versioned_messages.max_page_size = max_page_size;
+        options.history.enabled = true;
+        options.ai_transport.enabled = true;
+        options.ai_transport.channels = vec![sockudo_core::options::AiTransportChannelConfig {
+            prefix: "versioned-".to_string(),
+        }];
+        options.ai_transport.max_accumulated_message_bytes = max_accumulated_message_bytes;
+        options.ai_transport.max_appends_per_message = max_appends_per_message;
+        options.ai_transport.max_open_streaming_messages_per_channel =
+            max_open_streaming_messages_per_channel;
+
+        Arc::new(
+            ConnectionHandlerBuilder::new(app_manager, adapter, cache, options)
+                .history_store(Arc::new(MemoryHistoryStore::new(
+                    MemoryHistoryStoreConfig::default(),
+                )))
+                .version_store(version_store)
+                .build(),
+        )
     }
 
     fn test_versioned_record(
@@ -6033,6 +6655,7 @@ mod tests {
                 tags: None,
                 delta: None,
                 idempotency_key: None,
+                message_id: None,
                 extras: None,
             }),
         )
@@ -6067,6 +6690,7 @@ mod tests {
                 socket_id: None,
                 description: Some("patch".to_string()),
                 metadata: None,
+                op_id: None,
             }),
         )
         .await
@@ -6143,6 +6767,7 @@ mod tests {
                 tags: None,
                 delta: None,
                 idempotency_key: None,
+                message_id: None,
                 extras: None,
             }),
         )
@@ -6178,6 +6803,7 @@ mod tests {
                 socket_id: None,
                 description: Some("deleted".to_string()),
                 metadata: None,
+                op_id: None,
             }),
         )
         .await
@@ -6249,6 +6875,7 @@ mod tests {
                 tags: None,
                 delta: None,
                 idempotency_key: None,
+                message_id: None,
                 extras: None,
             }),
         )
@@ -6275,10 +6902,12 @@ mod tests {
             State(handler.clone()),
             Json(AppendMessageRequest {
                 data: " world".to_string(),
+                extras: None,
                 client_id: None,
                 socket_id: None,
                 description: Some("append".to_string()),
                 metadata: None,
+                op_id: None,
             }),
         )
         .await
@@ -6314,6 +6943,289 @@ mod tests {
         assert_eq!(json["items"][0]["message"]["data"], "hello world");
         assert_eq!(json["items"][0]["event_name"], "sockudo:message.append");
         assert_eq!(json["items"][0]["operation_kind"], "message.append");
+    }
+
+    #[tokio::test]
+    async fn append_message_rejects_ai_accumulated_content_over_cap() {
+        let store = Arc::new(MemoryVersionStore::new());
+        let handler = test_ai_versioned_handler_with_store(100, store.clone(), 8, 4096, 1024);
+        let app = test_app();
+
+        store
+            .append_version(test_versioned_record(
+                "msg:1",
+                "00000000000000000001:test:00000000000000000001",
+                10,
+                1,
+                "hello",
+            ))
+            .await
+            .unwrap();
+
+        let response = match append_message(
+            Path(VersionMutationPath {
+                app_id: "app-1".to_string(),
+                channel_name: "versioned-room".to_string(),
+                message_serial: "msg:1".to_string(),
+            }),
+            Extension(app),
+            State(handler),
+            Json(AppendMessageRequest {
+                data: " oversized".to_string(),
+                extras: None,
+                client_id: None,
+                socket_id: None,
+                description: Some("too large".to_string()),
+                metadata: None,
+                op_id: None,
+            }),
+        )
+        .await
+        {
+            Err(err) => err.into_response(),
+            Ok(_) => panic!("expected accumulated content cap rejection"),
+        };
+
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = sonic_rs::from_slice(&body).unwrap();
+        assert_eq!(json["ai_code"], 40009);
+        assert_eq!(json["code"], "payload_too_large");
+    }
+
+    #[tokio::test]
+    async fn append_message_rejects_ai_append_count_over_cap() {
+        let store = Arc::new(MemoryVersionStore::new());
+        let handler = test_ai_versioned_handler_with_store(100, store.clone(), 1024, 1, 1024);
+        let app = test_app();
+        let original = test_versioned_record(
+            "msg:1",
+            "00000000000000000001:test:00000000000000000001",
+            10,
+            1,
+            "hello",
+        );
+        let first_append = StoredVersionRecord {
+            message: original
+                .message
+                .apply_append(
+                    VersionMetadata {
+                        serial: VersionSerial::new(
+                            "00000000000000000002:test:00000000000000000002".to_string(),
+                        )
+                        .unwrap(),
+                        client_id: Some("user-1".to_string()),
+                        timestamp_ms: 2,
+                        description: None,
+                        metadata: None,
+                    },
+                    2,
+                    MessageAppend {
+                        data_fragment: "a".to_string(),
+                        extras: None,
+                    },
+                )
+                .unwrap(),
+            ..original.clone()
+        };
+        store.append_version(original).await.unwrap();
+        store.append_version(first_append).await.unwrap();
+
+        let response = match append_message(
+            Path(VersionMutationPath {
+                app_id: "app-1".to_string(),
+                channel_name: "versioned-room".to_string(),
+                message_serial: "msg:1".to_string(),
+            }),
+            Extension(app),
+            State(handler),
+            Json(AppendMessageRequest {
+                data: "b".to_string(),
+                extras: None,
+                client_id: None,
+                socket_id: None,
+                description: Some("over cap".to_string()),
+                metadata: None,
+                op_id: None,
+            }),
+        )
+        .await
+        {
+            Err(err) => err.into_response(),
+            Ok(_) => panic!("expected append count cap rejection"),
+        };
+
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = sonic_rs::from_slice(&body).unwrap();
+        assert_eq!(json["ai_code"], 40009);
+    }
+
+    #[tokio::test]
+    async fn append_message_persists_terminal_status_in_latest_record() {
+        let store = Arc::new(MemoryVersionStore::new());
+        let handler = test_ai_versioned_handler_with_store(100, store.clone(), 1024, 4096, 1024);
+        let app = test_app();
+
+        store
+            .append_version(test_versioned_record(
+                "msg:1",
+                "00000000000000000001:test:00000000000000000001",
+                10,
+                1,
+                "hello",
+            ))
+            .await
+            .unwrap();
+
+        let extras = MessageExtras {
+            ai: Some(sockudo_protocol::messages::AiExtras {
+                transport: Some(HashMap::from([(
+                    "status".to_string(),
+                    "complete".to_string(),
+                )])),
+                codec: None,
+            }),
+            ..Default::default()
+        };
+
+        let response = append_message(
+            Path(VersionMutationPath {
+                app_id: "app-1".to_string(),
+                channel_name: "versioned-room".to_string(),
+                message_serial: "msg:1".to_string(),
+            }),
+            Extension(app),
+            State(handler.clone()),
+            Json(AppendMessageRequest {
+                data: " world".to_string(),
+                extras: Some(extras),
+                client_id: None,
+                socket_id: None,
+                description: Some("terminal append".to_string()),
+                metadata: None,
+                op_id: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let latest = handler
+            .version_store()
+            .get_latest(
+                "app-1",
+                "versioned-room",
+                &MessageSerial::new("msg:1").unwrap(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            latest
+                .message
+                .extras
+                .as_ref()
+                .and_then(|extras| extras.ai_transport_headers())
+                .and_then(|headers| headers.status()),
+            Some("complete")
+        );
+        assert_eq!(
+            latest.message.data.unwrap().into_string().as_deref(),
+            Some("{\"text\":\"hello\"} world")
+        );
+    }
+
+    #[tokio::test]
+    async fn events_rejects_ai_create_when_open_stream_cap_is_reached() {
+        let store = Arc::new(MemoryVersionStore::new());
+        let handler = test_ai_versioned_handler_with_store(100, store, 1024, 4096, 1);
+        let app = test_app();
+        let streaming_extras = || MessageExtras {
+            ai: Some(sockudo_protocol::messages::AiExtras {
+                transport: Some(HashMap::from([(
+                    "status".to_string(),
+                    "streaming".to_string(),
+                )])),
+                codec: None,
+            }),
+            ..Default::default()
+        };
+
+        let first = events(
+            Path("app-1".to_string()),
+            Query(empty_event_query()),
+            Extension(app.clone()),
+            #[cfg(feature = "push")]
+            test_push_store(),
+            #[cfg(feature = "push")]
+            test_push_queue(),
+            State(handler.clone()),
+            HeaderMap::new(),
+            Uri::from_static("/apps/app-1/events"),
+            RawQuery(None),
+            Json(PusherApiMessage {
+                name: Some("ai-output".to_string()),
+                data: Some(ApiMessageData::String("hello".to_string())),
+                channel: Some("versioned-room".to_string()),
+                channels: None,
+                socket_id: None,
+                info: None,
+                tags: None,
+                delta: None,
+                idempotency_key: None,
+                message_id: None,
+                extras: Some(streaming_extras()),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(first.status(), StatusCode::OK);
+
+        let second = match events(
+            Path("app-1".to_string()),
+            Query(empty_event_query()),
+            Extension(app),
+            #[cfg(feature = "push")]
+            test_push_store(),
+            #[cfg(feature = "push")]
+            test_push_queue(),
+            State(handler),
+            HeaderMap::new(),
+            Uri::from_static("/apps/app-1/events"),
+            RawQuery(None),
+            Json(PusherApiMessage {
+                name: Some("ai-output".to_string()),
+                data: Some(ApiMessageData::String("hello again".to_string())),
+                channel: Some("versioned-room".to_string()),
+                channels: None,
+                socket_id: None,
+                info: None,
+                tags: None,
+                delta: None,
+                idempotency_key: None,
+                message_id: None,
+                extras: Some(streaming_extras()),
+            }),
+        )
+        .await
+        {
+            Err(err) => err.into_response(),
+            Ok(_) => panic!("expected open-stream cap rejection"),
+        };
+
+        assert_eq!(second.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let body = axum::body::to_bytes(second.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = sonic_rs::from_slice(&body).unwrap();
+        assert_eq!(json["ai_code"], 40009);
     }
 
     #[tokio::test]
@@ -7021,6 +7933,7 @@ mod tests {
                 socket_id: Some(socket_id.to_string()),
                 description: Some("blocked".to_string()),
                 metadata: None,
+                op_id: None,
             }),
         )
         .await
@@ -7029,7 +7942,13 @@ mod tests {
             Ok(_) => panic!("expected capability check to fail"),
         };
 
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = sonic_rs::from_slice(&body).unwrap();
+        assert_eq!(json["ai_code"], 93002);
+        assert_eq!(json["error"], "mutations not permitted on this channel");
     }
 
     #[tokio::test]
@@ -7080,6 +7999,7 @@ mod tests {
                 socket_id: Some(socket_id.to_string()),
                 description: Some("owner patch".to_string()),
                 metadata: None,
+                op_id: None,
             }),
         )
         .await
@@ -7152,6 +8072,7 @@ mod tests {
                 socket_id: Some(socket_id.to_string()),
                 description: Some("moderation".to_string()),
                 metadata: None,
+                op_id: None,
             }),
         )
         .await
@@ -7202,10 +8123,12 @@ mod tests {
             State(handler),
             Json(AppendMessageRequest {
                 data: " world".to_string(),
+                extras: None,
                 client_id: Some("user-2".to_string()),
                 socket_id: Some(socket_id.to_string()),
                 description: Some("unauthorized append".to_string()),
                 metadata: None,
+                op_id: None,
             }),
         )
         .await
@@ -7214,7 +8137,13 @@ mod tests {
             Ok(_) => panic!("expected own-scope append to be denied"),
         };
 
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = sonic_rs::from_slice(&body).unwrap();
+        assert_eq!(json["ai_code"], 93002);
+        assert_eq!(json["error"], "mutations not permitted on this channel");
     }
 
     #[tokio::test]
@@ -7242,10 +8171,12 @@ mod tests {
             State(handler),
             Json(AppendMessageRequest {
                 data: "hello".to_string(),
+                extras: None,
                 client_id: None,
                 socket_id: None,
                 description: None,
                 metadata: None,
+                op_id: None,
             }),
         )
         .await
