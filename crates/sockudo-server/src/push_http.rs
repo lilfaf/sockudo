@@ -1665,28 +1665,27 @@ fn encrypt_optional(raw: Option<String>) -> Result<Option<EncryptedSecret>, AppE
 
 fn encrypted_secret(raw: &str) -> Result<EncryptedSecret, AppError> {
     SecretString::new(raw).map_err(|error| AppError::InvalidInput(error.to_string()))?;
-    let ciphertext = if let Some(key) = credential_encryption_key() {
-        let cipher = Aes256Gcm::new_from_slice(&key)
-            .map_err(|error| AppError::InternalError(format!("invalid credential key: {error}")))?;
-        let nonce_bytes = credential_nonce_bytes();
-        let encrypted = cipher
-            .encrypt(Nonce::from_slice(&nonce_bytes), raw.as_bytes())
-            .map_err(|error| {
-                AppError::InternalError(format!("failed to encrypt credential material: {error}"))
-            })?;
-        let mut envelope = Vec::with_capacity(nonce_bytes.len() + encrypted.len());
-        envelope.extend_from_slice(&nonce_bytes);
-        envelope.extend_from_slice(&encrypted);
-        format!(
-            "{CREDENTIAL_SECRET_AES_PREFIX}{}",
-            URL_SAFE_NO_PAD.encode(envelope)
+    let key = credential_encryption_key().ok_or_else(|| {
+        AppError::InvalidInput(
+            "PUSH_CREDENTIAL_ENCRYPTION_KEY must be configured before storing push credentials"
+                .to_string(),
         )
-    } else {
-        format!(
-            "{CREDENTIAL_SECRET_LOCAL_PREFIX}{}",
-            URL_SAFE_NO_PAD.encode(raw.as_bytes())
-        )
-    };
+    })?;
+    let cipher = Aes256Gcm::new_from_slice(&key)
+        .map_err(|error| AppError::InternalError(format!("invalid credential key: {error}")))?;
+    let nonce_bytes = credential_nonce_bytes();
+    let encrypted = cipher
+        .encrypt(Nonce::from_slice(&nonce_bytes), raw.as_bytes())
+        .map_err(|error| {
+            AppError::InternalError(format!("failed to encrypt credential material: {error}"))
+        })?;
+    let mut envelope = Vec::with_capacity(nonce_bytes.len() + encrypted.len());
+    envelope.extend_from_slice(&nonce_bytes);
+    envelope.extend_from_slice(&encrypted);
+    let ciphertext = format!(
+        "{CREDENTIAL_SECRET_AES_PREFIX}{}",
+        URL_SAFE_NO_PAD.encode(envelope)
+    );
     EncryptedSecret::new(ciphertext).map_err(|error| AppError::InvalidInput(error.to_string()))
 }
 
@@ -1975,6 +1974,9 @@ mod tests {
         PushRecipient,
     };
     use std::sync::Arc;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn hashed_token(raw: &str) -> SecretString {
         hash_device_identity_token(&SecretString::new(raw).unwrap())
@@ -2047,6 +2049,48 @@ mod tests {
         assert!(!encoded.contains("provider-token"));
         assert!(!encoded.contains("device-token"));
         assert!(!encoded.contains("must-not-leak"));
+    }
+
+    #[test]
+    fn encrypted_secret_requires_encryption_key_for_new_writes() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let previous = std::env::var("PUSH_CREDENTIAL_ENCRYPTION_KEY").ok();
+        unsafe { std::env::remove_var("PUSH_CREDENTIAL_ENCRYPTION_KEY") };
+
+        let error = encrypted_secret("provider-secret").unwrap_err();
+
+        if let Some(previous) = previous {
+            unsafe { std::env::set_var("PUSH_CREDENTIAL_ENCRYPTION_KEY", previous) };
+        } else {
+            unsafe { std::env::remove_var("PUSH_CREDENTIAL_ENCRYPTION_KEY") };
+        }
+        assert!(
+            error
+                .to_string()
+                .contains("PUSH_CREDENTIAL_ENCRYPTION_KEY must be configured")
+        );
+    }
+
+    #[test]
+    fn encrypted_secret_writes_aes_envelope_when_key_is_configured() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let previous = std::env::var("PUSH_CREDENTIAL_ENCRYPTION_KEY").ok();
+        unsafe { std::env::set_var("PUSH_CREDENTIAL_ENCRYPTION_KEY", "test-key") };
+
+        let secret = encrypted_secret("provider-secret").unwrap();
+        let decrypted = decrypt_credential_secret(&secret).unwrap();
+
+        if let Some(previous) = previous {
+            unsafe { std::env::set_var("PUSH_CREDENTIAL_ENCRYPTION_KEY", previous) };
+        } else {
+            unsafe { std::env::remove_var("PUSH_CREDENTIAL_ENCRYPTION_KEY") };
+        }
+        assert!(
+            secret
+                .ciphertext()
+                .starts_with(CREDENTIAL_SECRET_AES_PREFIX)
+        );
+        assert_eq!(decrypted, "provider-secret");
     }
 
     #[test]

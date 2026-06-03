@@ -6,7 +6,7 @@ use sockudo_core::app::{
 };
 use sockudo_core::error::{Error, Result};
 use sockudo_core::options::{DatabaseConnection, DatabasePooling};
-use sockudo_core::token::Token;
+use sockudo_core::token::{Token, secure_compare};
 use sockudo_core::webhook_types::Webhook;
 use sockudo_core::websocket::SocketId;
 use sqlx::PgPool;
@@ -485,7 +485,7 @@ impl PgSQLAppManager {
         let token = Token::new(app.key.clone(), app.secret.clone());
         let expected = token.sign(body);
 
-        Ok(signature == expected)
+        Ok(secure_compare(signature, &expected))
     }
 
     /// Validate if a channel name is valid for an app

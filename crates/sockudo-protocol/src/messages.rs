@@ -552,7 +552,7 @@ pub struct ErrorData {
     pub message: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
 pub struct PusherMessage {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub event: Option<String>,
@@ -602,6 +602,28 @@ pub struct PusherMessage {
     /// Delta conflation key marker for full messages in V2 delta streams.
     #[serde(rename = "__conflation_key", skip_serializing_if = "Option::is_none")]
     pub delta_conflation_key: Option<String>,
+}
+
+impl std::fmt::Debug for PusherMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PusherMessage")
+            .field("event", &self.event)
+            .field("channel", &self.channel)
+            .field("has_data", &self.data.is_some())
+            .field("name", &self.name)
+            .field("user_id", &self.user_id)
+            .field("tags_count", &self.tags.as_ref().map(BTreeMap::len))
+            .field("sequence", &self.sequence)
+            .field("conflation_key", &self.conflation_key)
+            .field("message_id", &self.message_id)
+            .field("stream_id", &self.stream_id)
+            .field("serial", &self.serial)
+            .field("has_idempotency_key", &self.idempotency_key.is_some())
+            .field("has_extras", &self.extras.is_some())
+            .field("delta_sequence", &self.delta_sequence)
+            .field("delta_conflation_key", &self.delta_conflation_key)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1239,11 +1261,11 @@ impl InfoQueryParser for Option<&String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        AnnotationEventAction, AnnotationEventData, AnnotationSummaryEnvelope, MessageSummaryData,
-        PusherMessage,
+        AiExtras, AnnotationEventAction, AnnotationEventData, AnnotationSummaryEnvelope,
+        MessageData, MessageExtras, MessageSummaryData, PusherMessage,
     };
     use sonic_rs::JsonValueTrait;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, HashMap};
 
     #[test]
     fn protocol_heartbeat_detection_matches_both_prefix_families() {
@@ -1269,6 +1291,44 @@ mod tests {
         );
 
         assert!(!message.is_protocol_ping_or_pong());
+    }
+
+    #[test]
+    fn pusher_message_debug_redacts_payload_extras_and_idempotency() {
+        let mut transport = HashMap::new();
+        transport.insert("turn-id".to_string(), "secret-turn".to_string());
+        let message = PusherMessage {
+            event: Some("ai-output".to_string()),
+            channel: Some("ai:room".to_string()),
+            data: Some(MessageData::String("streaming prompt secret".to_string())),
+            name: None,
+            user_id: Some("client-1".to_string()),
+            tags: None,
+            sequence: None,
+            conflation_key: None,
+            message_id: Some("msg-1".to_string()),
+            stream_id: None,
+            serial: None,
+            idempotency_key: Some("idempotency-secret".to_string()),
+            extras: Some(MessageExtras {
+                ai: Some(AiExtras {
+                    transport: Some(transport),
+                    codec: None,
+                }),
+                ..MessageExtras::default()
+            }),
+            delta_sequence: None,
+            delta_conflation_key: None,
+        };
+
+        let rendered = format!("{message:?}");
+
+        assert!(!rendered.contains("streaming prompt secret"));
+        assert!(!rendered.contains("idempotency-secret"));
+        assert!(!rendered.contains("secret-turn"));
+        assert!(rendered.contains("has_data: true"));
+        assert!(rendered.contains("has_extras: true"));
+        assert!(rendered.contains("has_idempotency_key: true"));
     }
 
     #[test]

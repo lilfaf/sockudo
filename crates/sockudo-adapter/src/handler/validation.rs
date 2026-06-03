@@ -170,14 +170,18 @@ impl ConnectionHandler {
             });
         }
 
+        let verified_client_id = connection.get_user_id().await.ok_or_else(|| {
+            record_ai_rejection(self, &app_config.id, AI_ERROR_INVALID_TRANSPORT_HEADER);
+            Error::Auth("AI client events require an authenticated client_id".to_string())
+        })?;
+
         message.validate_ai_headers().map_err(|error| {
             record_ai_rejection(self, &app_config.id, error.code);
             ai_header_error(error)
         })?;
-        let verified_client_id = connection.get_user_id().await;
         validate_ai_client_id_headers(
             message,
-            verified_client_id.as_deref(),
+            Some(verified_client_id.as_str()),
             AiPublishTrust::Client,
         )
         .map_err(|error| {

@@ -213,6 +213,10 @@ impl ConnectionHandlerBuilder {
                 window_ms: rollup.default_window_ms,
                 orphan_ttl_ms: rollup.orphan_ttl_ms,
                 shards: rollup.shards,
+                max_active_streams_per_channel: self
+                    .server_options
+                    .ai_transport
+                    .max_open_streaming_messages_per_channel,
             })))
         } else {
             None
@@ -811,8 +815,13 @@ impl ConnectionHandler {
         }
 
         debug!(
-            "Received message from {socket_id}: event '{event_name}', full message: {:?}",
-            message
+            %socket_id,
+            event = %event_name,
+            payload_bytes = match &message {
+                Message::Text(bytes) | Message::Binary(bytes) => bytes.len(),
+                _ => 0,
+            },
+            "Received WebSocket message"
         );
 
         // Check all-message rate limit first
@@ -986,6 +995,7 @@ impl ConnectionHandler {
         // Remove rate limiters
         self.client_event_limiters.remove(socket_id);
         self.message_limiters.remove(socket_id);
+        self.history_request_limits.remove(socket_id);
 
         // MEMORY LEAK FIX: Clean up delta compression state for this socket
         #[cfg(feature = "delta")]

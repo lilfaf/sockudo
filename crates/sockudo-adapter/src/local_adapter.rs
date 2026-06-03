@@ -1529,8 +1529,14 @@ impl ConnectionManager for LocalAdapter {
         app_id: &str,
         _start_time_ms: Option<f64>,
     ) -> Result<()> {
-        debug!("Sending message to channel: {}", channel);
-        debug!("Message: {:?}", message);
+        debug!(
+            channel = %channel,
+            event = message.event.as_deref(),
+            has_data = message.data.is_some(),
+            has_extras = message.extras.is_some(),
+            has_idempotency_key = message.idempotency_key.is_some(),
+            "Sending message to channel"
+        );
 
         // Check if delta compression is available (lock-free read via OnceLock)
         #[cfg(feature = "delta")]
@@ -1647,10 +1653,13 @@ impl ConnectionManager for LocalAdapter {
         let delta_compression = compression.delta_compression;
         let channel_settings = compression.channel_settings;
         debug!(
-            "Sending message to channel with compression support: {}",
-            channel
+            channel = %channel,
+            event = message.event.as_deref(),
+            has_data = message.data.is_some(),
+            has_extras = message.extras.is_some(),
+            has_idempotency_key = message.idempotency_key.is_some(),
+            "Sending message to channel with compression support"
         );
-        debug!("Message: {:?}", message);
 
         let Some(namespace) = self.get_namespace(app_id).await else {
             return Ok(());

@@ -25,6 +25,7 @@ pub struct RollupConfig {
     pub window_ms: u64,
     pub orphan_ttl_ms: u64,
     pub shards: usize,
+    pub max_active_streams_per_channel: usize,
 }
 
 impl Default for RollupConfig {
@@ -34,6 +35,7 @@ impl Default for RollupConfig {
             window_ms: 40,
             orphan_ttl_ms: 1_000,
             shards: DEFAULT_SHARDS,
+            max_active_streams_per_channel: 1024,
         }
     }
 }
@@ -71,6 +73,12 @@ struct StreamKey {
     app_id: String,
     channel: String,
     message_serial: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ChannelKey {
+    app_id: String,
+    channel: String,
 }
 
 #[derive(Debug, Clone)]
@@ -143,6 +151,7 @@ struct Shard {
 pub struct RollupEngine {
     config: RollupConfig,
     shards: Vec<Shard>,
+    active_by_channel: Mutex<AHashMap<ChannelKey, usize>>,
     appends_received: std::sync::atomic::AtomicU64,
     appends_delivered: std::sync::atomic::AtomicU64,
 }
@@ -159,6 +168,7 @@ impl RollupEngine {
         Self {
             config,
             shards,
+            active_by_channel: Mutex::new(AHashMap::new()),
             appends_received: std::sync::atomic::AtomicU64::new(0),
             appends_delivered: std::sync::atomic::AtomicU64::new(0),
         }
@@ -199,12 +209,17 @@ impl RollupEngine {
             channel: channel.to_string(),
             message_serial,
         };
+        let channel_key = ChannelKey {
+            app_id: app_id.to_string(),
+            channel: channel.to_string(),
+        };
         let shard = self.shard(&key);
         let mut deliveries = Vec::with_capacity(2);
         let mut streams = shard.streams.lock().unwrap_or_else(|err| err.into_inner());
 
         if matches!(action, MessageAction::Update | MessageAction::Delete) {
             if let Some(mut pending) = streams.remove(&key) {
+                self.decrement_channel(&channel_key);
                 deliveries.push(pending.flush(
                     RollupDeliveryReason::TerminalFlush,
                     app_id,
@@ -230,6 +245,7 @@ impl RollupEngine {
         self.mark_received();
         if is_terminal_append(&message) {
             if let Some(mut pending) = streams.remove(&key) {
+                self.decrement_channel(&channel_key);
                 deliveries.push(pending.flush(
                     RollupDeliveryReason::TerminalFlush,
                     app_id,
@@ -269,6 +285,10 @@ impl RollupEngine {
                 pending.push(now_ms, message);
             }
         } else {
+            if !self.try_increment_channel(&channel_key) {
+                self.mark_delivered(1);
+                return vec![bypass(app_id, channel, message)];
+            }
             streams.insert(
                 key,
                 PendingStream::new(now_ms, now_ms + self.config.window_ms, message.clone()),
@@ -317,14 +337,18 @@ impl RollupEngine {
                 })
                 .collect::<Vec<_>>();
             for key in keys {
-                if let Some(mut pending) = streams.remove(&key)
-                    && pending.appended_count > 0
-                {
-                    deliveries.push(pending.flush(
-                        RollupDeliveryReason::Orphan,
-                        &key.app_id,
-                        &key.channel,
-                    ));
+                if let Some(mut pending) = streams.remove(&key) {
+                    self.decrement_channel(&ChannelKey {
+                        app_id: key.app_id.clone(),
+                        channel: key.channel.clone(),
+                    });
+                    if pending.appended_count > 0 {
+                        deliveries.push(pending.flush(
+                            RollupDeliveryReason::Orphan,
+                            &key.app_id,
+                            &key.channel,
+                        ));
+                    }
                 }
             }
         }
@@ -377,6 +401,10 @@ impl RollupEngine {
                 .collect::<Vec<_>>();
             for key in keys {
                 if let Some(mut pending) = streams.remove(&key) {
+                    self.decrement_channel(&ChannelKey {
+                        app_id: key.app_id.clone(),
+                        channel: key.channel.clone(),
+                    });
                     deliveries.push(pending.flush(reason, &key.app_id, &key.channel));
                 }
             }
@@ -401,6 +429,32 @@ impl RollupEngine {
     fn mark_delivered(&self, count: u64) {
         self.appends_delivered
             .fetch_add(count, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn try_increment_channel(&self, key: &ChannelKey) -> bool {
+        let mut active = self
+            .active_by_channel
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let count = active.entry(key.clone()).or_insert(0);
+        if *count >= self.config.max_active_streams_per_channel {
+            return false;
+        }
+        *count += 1;
+        true
+    }
+
+    fn decrement_channel(&self, key: &ChannelKey) {
+        let mut active = self
+            .active_by_channel
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        if let Some(count) = active.get_mut(key) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                active.remove(key);
+            }
+        }
     }
 }
 
@@ -695,6 +749,30 @@ mod tests {
         let out = engine.sweep_orphans(60);
         assert!(out.is_empty());
         assert_eq!(engine.active_streams(), 0);
+    }
+
+    #[test]
+    fn active_stream_cap_bypasses_new_rollup_state() {
+        let engine = RollupEngine::new(RollupConfig {
+            max_active_streams_per_channel: 1,
+            ..RollupConfig::default()
+        });
+
+        let first = engine.ingest("app", "ai:room", append("m1", "a", 1), 0);
+        let second = engine.ingest("app", "ai:room", append("m2", "b", 2), 1);
+
+        assert_eq!(first[0].reason, RollupDeliveryReason::Immediate);
+        assert_eq!(second[0].reason, RollupDeliveryReason::Bypass);
+        assert_eq!(engine.active_streams(), 1);
+
+        let terminal = engine.ingest("app", "ai:room", terminal_append("m1", "a"), 2);
+        assert_eq!(terminal[0].reason, RollupDeliveryReason::TerminalFlush);
+        assert_eq!(terminal[1].reason, RollupDeliveryReason::Terminal);
+        assert_eq!(engine.active_streams(), 0);
+
+        let third = engine.ingest("app", "ai:room", append("m2", "bc", 3), 3);
+        assert_eq!(third[0].reason, RollupDeliveryReason::Immediate);
+        assert_eq!(engine.active_streams(), 1);
     }
 
     #[test]
