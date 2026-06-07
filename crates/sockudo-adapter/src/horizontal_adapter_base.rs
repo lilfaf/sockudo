@@ -1510,6 +1510,17 @@ where
             .await
     }
 
+    async fn add_to_channel_and_count_local(
+        &self,
+        app_id: &str,
+        channel: &str,
+        socket_id: &SocketId,
+    ) -> Result<(bool, usize)> {
+        self.local_adapter
+            .add_to_channel_and_count_local(app_id, channel, socket_id)
+            .await
+    }
+
     async fn remove_from_channel(
         &self,
         app_id: &str,
@@ -1519,6 +1530,17 @@ where
         // Fast path: direct local adapter access without locking horizontal
         self.local_adapter
             .remove_from_channel(app_id, channel, socket_id)
+            .await
+    }
+
+    async fn remove_from_channel_and_count_local(
+        &self,
+        app_id: &str,
+        channel: &str,
+        socket_id: &SocketId,
+    ) -> Result<(bool, usize)> {
+        self.local_adapter
+            .remove_from_channel_and_count_local(app_id, channel, socket_id)
             .await
     }
 

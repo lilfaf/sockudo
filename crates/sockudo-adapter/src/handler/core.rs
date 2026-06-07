@@ -66,8 +66,10 @@ impl ConnectionHandler {
         self.delta_compression
             .clear_channel_state(socket_id, &channel_name);
 
-        // Perform unsubscription through channel manager
-        let leave_response = ChannelManager::unsubscribe(
+        // Perform the local unsubscription first. Cluster-wide count updates are
+        // emitted after the hot path so client room-switch churn does not block
+        // on horizontal request/reply fanout.
+        let leave_response = ChannelManager::unsubscribe_local(
             &self.connection_manager,
             &socket_id.to_string(),
             &channel_name,
@@ -79,13 +81,6 @@ impl ConnectionHandler {
         // Update connection state
         self.update_connection_unsubscribe_state(socket_id, app_config, &channel_name)
             .await?;
-
-        // Get current subscription count after unsubscribe (cluster-wide, used
-        // for subscription_count / channel_vacated events and webhooks below).
-        let current_sub_count = self
-            .connection_manager
-            .get_channel_socket_count(&app_config.id, &channel_name)
-            .await;
 
         // Track unsubscription metrics
         if let Some(ref metrics) = self.metrics {
@@ -108,71 +103,101 @@ impl ConnectionHandler {
         }
 
         // Handle presence channel member removal
-        if channel_name.starts_with("presence-") {
-            if let Some(user_id_str) = user_id {
-                let presence_history_policy = app_config.resolved_presence_history(
+        if channel_name.starts_with("presence-")
+            && let Some(user_id_str) = user_id
+        {
+            let presence_history_policy = app_config
+                .resolved_presence_history(&channel_name, &self.server_options().presence_history);
+            // Use centralized presence member removal logic (instance method for race safety)
+            self.presence_manager
+                .handle_member_removed(
+                    &self.connection_manager,
+                    Arc::clone(self.presence_history_store()),
+                    presence_history_policy.enabled,
+                    self.webhook_integration.as_ref(),
+                    self.metrics.as_ref(),
+                    app_config,
                     &channel_name,
-                    &self.server_options().presence_history,
-                );
-                // Use centralized presence member removal logic (instance method for race safety)
-                self.presence_manager
-                    .handle_member_removed(
-                        &self.connection_manager,
-                        Arc::clone(self.presence_history_store()),
-                        presence_history_policy.enabled,
-                        self.webhook_integration.as_ref(),
-                        self.metrics.as_ref(),
-                        app_config,
-                        &channel_name,
-                        &user_id_str,
-                        Some(socket_id),
-                        sockudo_core::presence_history::PresenceHistoryEventCause::Disconnect,
-                        None,
-                        Some(presence_history_policy.retention()),
-                    )
-                    .await?;
-            }
-        } else {
-            // Send subscription count webhook for non-presence channels
-            if !sockudo_core::utils::is_meta_channel(&channel_name)
-                && let Some(webhook_integration) = &self.webhook_integration
+                    &user_id_str,
+                    Some(socket_id),
+                    sockudo_core::presence_history::PresenceHistoryEventCause::Disconnect,
+                    None,
+                    Some(presence_history_policy.retention()),
+                )
+                .await?;
+        }
+
+        self.spawn_unsubscribe_count_notifications(app_config.clone(), channel_name.clone());
+
+        Ok(())
+    }
+
+    fn spawn_unsubscribe_count_notifications(&self, app_config: App, channel_name: String) {
+        if sockudo_core::utils::is_meta_channel(&channel_name) {
+            return;
+        }
+
+        let handler = self.clone();
+        tokio::spawn(async move {
+            if let Err(e) = handler
+                .send_unsubscribe_count_notifications(&app_config, &channel_name)
+                .await
             {
-                webhook_integration
-                    .send_subscription_count_changed(app_config, &channel_name, current_sub_count)
-                    .await
-                    .ok();
+                warn!(
+                    "Failed to emit unsubscribe count notifications for {}: {}",
+                    channel_name, e
+                );
             }
+        });
+    }
+
+    async fn send_unsubscribe_count_notifications(
+        &self,
+        app_config: &App,
+        channel_name: &str,
+    ) -> Result<()> {
+        if sockudo_core::utils::is_meta_channel(channel_name) {
+            return Ok(());
         }
 
-        if !sockudo_core::utils::is_meta_channel(&channel_name) {
-            let event_name = if current_sub_count == 0 {
-                "channel_vacated"
-            } else {
-                "subscription_count"
-            };
-            self.broadcast_metachannel_event(
-                app_config,
-                &channel_name,
-                event_name,
-                sonic_rs::json!({
-                    "channel": channel_name,
-                    "subscription_count": current_sub_count,
-                }),
-            )
-            .await
-            .ok();
+        let current_sub_count = self
+            .connection_manager
+            .get_channel_socket_count(&app_config.id, channel_name)
+            .await;
+
+        if !channel_name.starts_with("presence-")
+            && let Some(webhook_integration) = &self.webhook_integration
+        {
+            webhook_integration
+                .send_subscription_count_changed(app_config, channel_name, current_sub_count)
+                .await
+                .ok();
         }
 
-        // Send channel_vacated webhook if no subscribers left (with 3-second delay)
-        // Per Pusher spec: delay prevents spurious webhooks from momentary disconnects
+        let event_name = if current_sub_count == 0 {
+            "channel_vacated"
+        } else {
+            "subscription_count"
+        };
+        self.broadcast_metachannel_event(
+            app_config,
+            channel_name,
+            event_name,
+            sonic_rs::json!({
+                "channel": channel_name,
+                "subscription_count": current_sub_count,
+            }),
+        )
+        .await
+        .ok();
+
         if current_sub_count == 0
-            && !sockudo_core::utils::is_meta_channel(&channel_name)
             && let Some(webhook_integration) = &self.webhook_integration
         {
             let wi = Arc::clone(webhook_integration);
             let cm = Arc::clone(&self.connection_manager);
             let app = app_config.clone();
-            let channel = channel_name.clone();
+            let channel = channel_name.to_string();
             tokio::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                 let count = cm.get_channel_socket_count(&app.id, &channel).await;
