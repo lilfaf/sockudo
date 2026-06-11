@@ -16,7 +16,6 @@ pub use bootstrap::MetricsFactory;
 use bootstrap::SockudoServer;
 
 use clap::Parser;
-use mimalloc::MiMalloc;
 use sockudo_core::error::{Error, Result};
 use sockudo_core::options::ServerOptions;
 use tracing::{debug, error, info};
@@ -29,8 +28,10 @@ struct Args {
     config: Option<String>,
 }
 
+// jemalloc is the default allocator, Windows MSVC falls back to the system allocator.
+#[cfg(not(target_env = "msvc"))]
 #[global_allocator]
-static GLOBAL: MiMalloc = MiMalloc;
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 #[tokio::main]
 async fn main() -> Result<()> {
