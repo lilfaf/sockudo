@@ -11,6 +11,33 @@ dashboard/
 └── web/     Vue 3 operator UI
 ```
 
+## Available Features
+
+### Dashboard API (`dashboard/api`)
+
+Bun + Hono service on port **3460** (`/api/v1/*`):
+
+- **Auth** — email/password login, JWT session cookies, logout, `/auth/me`
+- **Users** — DB-backed operators with `admin` and `operator` roles; create, update, delete, change password
+- **Apps** — list, create, update, delete Sockudo applications; rotate app secrets
+- **Webhooks** — per-app webhook CRUD against the Sockudo app store
+- **Ops** — proxy to Sockudo `/stats`, `/usage`, `/metrics`, and health endpoints
+- **Bootstrap** — automatic migrations and optional first-admin seed on startup
+
+Supports `mysql`, `pgsql`, and `dynamodb` app managers (not `memory`).
+
+### Dashboard UI (`dashboard/web`)
+
+Vue 3 + Vite operator UI on port **5174**:
+
+- **Login** — session-based sign-in against the dashboard API
+- **Apps** — browse and manage applications
+- **App detail** — edit limits, credentials, and webhooks per app
+- **Metrics** — Sockudo stats and Prometheus summary views
+- **Users** — admin-only user management
+
+Docker services: `dashboard-api`, `dashboard-web` (see [Docker](#docker) below).
+
 ## Prerequisites
 
 1. Sockudo must use a **durable** app manager (not `memory`):
