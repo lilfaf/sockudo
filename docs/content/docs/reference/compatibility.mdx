@@ -64,5 +64,90 @@ AI Transport is additive and default-off. The server release order is:
 | Existing client SDKs | Full product parity depends on `plans/ai-transport/03-existing-sdks-prompts.md` E4/E5 enablement |
 | Server HTTP SDKs | Existing Pusher-compatible publish APIs continue to work; AI helpers ship after SDK release gates |
 
+## Compatibility matrix
+
+The table below is generated from `docs/specs/compat-matrix.json`. Any PR that changes a
+wire-visible surface must update the registry or explicitly confirm it is unchanged, then run
+`node scripts/generate-compat-matrix.mjs`.
+
+## Release gates
+
+Protocol-visible server PRs must pass the Protocol Change checklist and the compatibility
+matrix drift test. When protocol-owned paths change, CI also requires the `sockudo-js`
+compatibility lane because that SDK is the reference client for cross-SDK compatibility.
+
+SDK release workflows must run their E1 lane against both the latest released Sockudo server
+and server `main` before publishing. API-diff jobs block non-additive public API changes unless
+the release is intentionally major.
+
+Rollback starts by disabling the new server feature flag. Client packages can then be pinned
+back independently because valid V1 and existing V2 traffic remain compatible.
+
 GA evidence is tracked in
 [`docs/specs/ai-transport-ga-readiness.md`](/specs/ai-transport-ga-readiness).
+
+## Generated SDK Compatibility Matrix
+
+<!-- compat-matrix:start -->
+
+_Generated from `docs/specs/compat-matrix.json` by `node scripts/generate-compat-matrix.mjs`. Do not edit this block by hand._
+
+### Server baselines
+
+- Server 4.5.x, wire v1, profiles default-config, ai-enabled: Protocol V1 remains additive-only and Pusher-compatible; AI Transport is default-off.
+
+### Supported-since matrix
+
+| Server / flags | SDK | Package | Published | V1 | V2 core | Recovery | Rewind | History + untilAttach | Mutable messages | Presence update | Capability tokens | Rollup param | AI conventions |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 4.5.x / default-config, ai-enabled | Sockudo JS client | @sockudo/client | 1.3.0 | 1.3.0 | 1.3.0 | 1.3.0 | 1.3.0 | next | next | next | next | next | next |
+| 4.5.x / ai-enabled | Sockudo AI Transport | @sockudo/ai-transport | 0.1.0 | Not supported | Not supported | Not supported | Not supported | Not supported | Not supported | Not supported | Not supported | Not supported | 0.1.0 |
+| 4.5.x / default-config, ai-enabled | Sockudo .NET client | Sockudo.Client | 1.0.0 | 1.0.0 | 1.0.0 | Not supported | Not supported | Not supported | Not supported | Not supported | Not supported | Not supported | Not supported |
+| 4.5.x / default-config, ai-enabled | Sockudo Flutter client | sockudo_flutter | 1.0.0 | 1.0.0 | 1.0.0 | Not supported | Not supported | Not supported | Not supported | Not supported | Not supported | Not supported | Not supported |
+| 4.5.x / default-config, ai-enabled | Sockudo Kotlin client | io.sockudo:sockudo-kotlin | 1.0.0 | 1.0.0 | 1.0.0 | Not supported | Not supported | Not supported | Not supported | Not supported | Not supported | Not supported | Not supported |
+| 4.5.x / default-config, ai-enabled | Sockudo Swift client | SockudoSwift | 1.0.0 | 1.0.0 | 1.0.0 | Not supported | Not supported | Not supported | Not supported | Not supported | Not supported | Not supported | Not supported |
+| 4.5.x / default-config, ai-enabled | Sockudo HTTP Node | sockudo | 1.0.0 | 1.0.0 | Not supported | Not supported | Not supported | next | next | Not supported | Not supported | Not supported | next |
+| 4.5.x / default-config, ai-enabled | Sockudo HTTP PHP | sockudo/sockudo-php-server | 5.x | 5.x | Not supported | Not supported | Not supported | Not supported | Not supported | Not supported | Not supported | Not supported | Not supported |
+| 4.5.x / default-config, ai-enabled | Sockudo HTTP Python | sockudo-http-python | 1.0.0 | 1.0.0 | Not supported | Not supported | Not supported | Not supported | Not supported | Not supported | Not supported | Not supported | Not supported |
+| 4.5.x / default-config, ai-enabled | Sockudo HTTP Ruby | sockudo | 1.0.0 | 1.0.0 | Not supported | Not supported | Not supported | Not supported | Not supported | Not supported | Not supported | Not supported | Not supported |
+| 4.5.x / default-config, ai-enabled | Sockudo HTTP Go | github.com/sockudo/sockudo-http-go/v5 | 5.x | 5.x | Not supported | Not supported | Not supported | Not supported | Not supported | Not supported | Not supported | Not supported | Not supported |
+| 4.5.x / default-config, ai-enabled | Sockudo HTTP Java | io.sockudo:sockudo-http-java | 1.0.0 | 1.0.0 | Not supported | Not supported | Not supported | Not supported | Not supported | Not supported | Not supported | Not supported | Not supported |
+| 4.5.x / default-config, ai-enabled | Sockudo HTTP .NET | SockudoServer | 1.0.0 | 1.0.0 | Not supported | Not supported | Not supported | Not supported | Not supported | Not supported | Not supported | Not supported | Not supported |
+| 4.5.x / default-config, ai-enabled | Sockudo HTTP Rust | sockudo-http | 1.0.0 | 1.0.0 | Not supported | Not supported | Not supported | Not supported | Not supported | Not supported | Not supported | Not supported | Not supported |
+| 4.5.x / default-config, ai-enabled | Sockudo HTTP Swift | Sockudo | 1.0.0 | 1.0.0 | Not supported | Not supported | Not supported | Not supported | Not supported | Not supported | Not supported | Not supported | Not supported |
+
+### Registry notes
+
+- `sockudo-js`: Reference client lane; protocol PRs must keep this lane green.
+- `sockudo-ai-transport`: Application-level AI conventions over Sockudo JS and Protocol V2.
+- `sockudo-dotnet`: E2 tolerance fixes are required before AI-enabled profiles become a release gate.
+- `sockudo-flutter`: E2 tolerance fixes are required before AI-enabled profiles become a release gate.
+- `sockudo-kotlin`: E2 tolerance fixes are required before AI-enabled profiles become a release gate.
+- `sockudo-swift`: E2 tolerance fixes are required before AI-enabled profiles become a release gate.
+- `sockudo-http-node`: Reference server HTTP SDK for E5 additive AI publishing helpers.
+- `sockudo-http-php`: Webhook and response tolerance hardening must remain release-gated.
+- `sockudo-http-python`: Webhook and response tolerance hardening must remain release-gated.
+- `sockudo-http-ruby`: Webhook and response tolerance hardening must remain release-gated.
+- `sockudo-http-go`: Webhook and response tolerance hardening must remain release-gated.
+- `sockudo-http-java`: Webhook and response tolerance hardening must remain release-gated.
+- `sockudo-http-dotnet`: Webhook and response tolerance hardening must remain release-gated.
+- `sockudo-http-rust`: Webhook and response tolerance hardening must remain release-gated.
+- `sockudo-http-swift`: Webhook and response tolerance hardening must remain release-gated.
+
+### Support window
+
+- Server: Current and previous minor Sockudo server releases.
+- SDKs: Current and previous minor SDK releases for each supported language.
+- Deprecations: No AI Transport deprecations are permitted in this plan.
+
+### Release order
+
+1. `server-defaults-off`
+2. `sockudo-js`
+3. `sockudo-ai-transport`
+4. `other-client-sdks`
+5. `server-http-sdks`
+
+Last release-order rehearsal: 2026-06-13 (local registry dry-run), recorded in `docs/specs/ai-transport-results/compat-release-rehearsal.json`.
+
+<!-- compat-matrix:end -->
