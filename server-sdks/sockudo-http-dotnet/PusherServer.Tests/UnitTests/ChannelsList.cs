@@ -26,7 +26,7 @@ namespace PusherServer.Tests.UnitTests
         {
             ChannelsList list = JsonConvert.DeserializeObject<ChannelsList>(json);
 
-            Assert.AreEqual( list["presence-channel"]["user_count"], "300" );
+            Assert.AreEqual(list["presence-channel"]["user_count"], "300");
         }
     }
 }

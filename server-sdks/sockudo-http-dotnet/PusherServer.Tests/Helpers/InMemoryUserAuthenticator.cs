@@ -2,7 +2,7 @@
 
 namespace PusherServer.Tests.Helpers
 {
-    internal class InMemoryUserAuthenticator: IUserAuthenticator
+    internal class InMemoryUserAuthenticator : IUserAuthenticator
     {
         private readonly PusherServer.Pusher _pusher;
         private readonly UserData _userData;

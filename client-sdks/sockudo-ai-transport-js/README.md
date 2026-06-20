@@ -9,8 +9,14 @@ there. Only `src/realtime/` imports `@sockudo/client`.
 
 ## Install
 
-Clone the Sockudo monorepo, build this SDK and `@sockudo/client`, then install them from local
-paths until npm publishing is enabled:
+For apps, install the published packages:
+
+```bash
+pnpm add @sockudo/client @sockudo/ai-transport
+```
+
+For local monorepo development, build this SDK and `@sockudo/client`, then install them from local
+paths:
 
 ```bash
 git clone https://github.com/sockudo/sockudo.git
@@ -50,7 +56,7 @@ pnpm add @anthropic-ai/sdk
 
 The Vercel path mirrors Ably's AI Transport flow with Sockudo channel auth, versioned-message
 proxying, and `streamText` in a route handler. The Nuxt demo uses the workspace `@sockudo/client`
-package instead of the old archived GitHub mirror.
+package from this monorepo.
 
 ```tsx
 import { ChatTransportProvider } from "@sockudo/ai-transport/vercel/react";
@@ -124,17 +130,17 @@ Each entry ships ESM, UMD-for-CommonJS, and declaration files.
 
 These lanes are part of CI for the `0.1.x` release line.
 
-| Surface        | Supported range                                                      | CI evidence                                                                |
-| -------------- | -------------------------------------------------------------------- | -------------------------------------------------------------------------- |
-| Node.js        | 20, 22                                                               | `validate` and `integration` lanes                                         |
-| Browsers       | Last 2 evergreen families via Playwright engines                     | `browser-smoke` on Chromium, Firefox, WebKit against `demo/`               |
-| React          | 18, 19                                                               | `react-compat` lane                                                        |
-| Vue            | 3.x                                                                  | Vue composable unit tests and typed package exports                        |
-| Svelte         | 5.x                                                                  | Svelte store unit tests and typed package exports                          |
-| Vercel AI SDK  | `ai` v6                                                              | locked dev lane plus peer range `^6`                                       |
-| Direct LLMs    | OpenAI SDK 6.x, Anthropic SDK 0.103.x, compatible HTTP/SSE endpoints | provider adapter unit tests                                                |
-| Sockudo server | 4.x with AI Transport wire protocol v1                               | pinned integration server SHA `f66434eab44e688d3df42e56d8ebaf9aba6b1575`   |
-| Sockudo client | `@sockudo/client` `^1.3.0`                                           | peer dependency and integration adapter tests                              |
+| Surface        | Supported range                                                      | CI evidence                                                              |
+| -------------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| Node.js        | 20, 22                                                               | `validate` and `integration` lanes                                       |
+| Browsers       | Last 2 evergreen families via Playwright engines                     | `browser-smoke` on Chromium, Firefox, WebKit against `demo/`             |
+| React          | 18, 19                                                               | `react-compat` lane                                                      |
+| Vue            | 3.x                                                                  | Vue composable unit tests and typed package exports                      |
+| Svelte         | 5.x                                                                  | Svelte store unit tests and typed package exports                        |
+| Vercel AI SDK  | `ai` v6                                                              | locked dev lane plus peer range `^6`                                     |
+| Direct LLMs    | OpenAI SDK 6.x, Anthropic SDK 0.103.x, compatible HTTP/SSE endpoints | provider adapter unit tests                                              |
+| Sockudo server | 4.x with AI Transport wire protocol v1                               | pinned integration server SHA `f66434eab44e688d3df42e56d8ebaf9aba6b1575` |
+| Sockudo client | `@sockudo/client` `^1.3.0`                                           | peer dependency and integration adapter tests                            |
 
 When `@sockudo/client` exposes server handshake feature flags, the SDK checks for `ai-transport`
 during client transport construction. If a server explicitly advertises feature flags without

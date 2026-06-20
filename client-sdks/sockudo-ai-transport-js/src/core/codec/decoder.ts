@@ -92,7 +92,9 @@ export function createDecoderCore<TEvent>(
       const messageId = codecMessageId(message);
       const transport = message.getTransportHeaders();
       const stream = transport[HEADER_STREAM] === "true";
-      const trackerId = stream ? streamTrackerId(message, messageId) : messageId;
+      const trackerId = stream
+        ? streamTrackerId(message, messageId)
+        : messageId;
       switch (message.action) {
         case "create":
           if (!stream) {
@@ -121,13 +123,7 @@ export function createDecoderCore<TEvent>(
           );
         case "update":
           if (typeof message.data !== "string") {
-            return metadataUpdate(
-              trackers,
-              hooks,
-              options,
-              trackerId,
-              message,
-            );
+            return metadataUpdate(trackers, hooks, options, trackerId, message);
           }
           return updateOrFirstContact(
             trackers,

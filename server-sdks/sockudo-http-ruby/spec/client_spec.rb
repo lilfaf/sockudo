@@ -382,9 +382,9 @@ describe Sockudo do
                                            formFactor: 'phone',
                                            platform: 'android'
                                          }, rotate_device_identity_token: true)).to eq({
-                                                                                           change: 'inserted',
-                                                                                           deviceIdentityToken: 'identity'
-                                                                                         })
+                                                                                         change: 'inserted',
+                                                                                         deviceIdentityToken: 'identity'
+                                                                                       })
 
           expect(WebMock).to(have_requested(:post, api_path).with do |req|
             parsed = MultiJson.decode(req.body)
@@ -408,10 +408,10 @@ describe Sockudo do
                                                  })
 
           expect(@client.list_device_registrations(limit: 10, cursor: 'c1')).to eq({
-                                                                                      items: [],
-                                                                                      has_more: false,
-                                                                                      next_cursor: nil
-                                                                                    })
+                                                                                     items: [],
+                                                                                     has_more: false,
+                                                                                     next_cursor: nil
+                                                                                   })
 
           expect(WebMock).to(have_requested(:get, api_path).with do |req|
             expect(req.uri.query).to include('limit=10')

@@ -2,12 +2,12 @@
 
 namespace PusherServer.Tests.Helpers
 {
-    internal class InMemoryChannelAuthorizer: IChannelAuthorizer
+    internal class InMemoryChannelAuthorizer : IChannelAuthorizer
     {
         private readonly PusherServer.Pusher _pusher;
         private readonly PresenceChannelData _presenceData;
 
-        public InMemoryChannelAuthorizer(PusherServer.Pusher pusher):
+        public InMemoryChannelAuthorizer(PusherServer.Pusher pusher) :
             this(pusher, null)
         {
         }

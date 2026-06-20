@@ -3,9 +3,9 @@
   "description": "Node.js client to interact with the Sockudo REST API",
   "version": "1.0.0",
   "author": "Sockudo",
-  "homepage": "https://github.com/sockudo/sockudo-http-node#readme",
+  "homepage": "https://github.com/sockudo/sockudo/tree/master/server-sdks/sockudo-http-node#readme",
   "bugs": {
-    "url": "https://github.com/sockudo/sockudo-http-node/issues"
+    "url": "https://github.com/sockudo/sockudo/issues"
   },
   "contributors": [
     {
@@ -68,8 +68,9 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "prelocal-test": "npm run build",
     "pretest": "npm run build",
-    "lint": "npx oxlint --config .oxlintrc.json src tests examples index.d.ts && npx oxfmt --check src tests examples index.d.ts package.json tsconfig.json .oxlintrc.json",
-    "format": "npx oxfmt src tests examples index.d.ts package.json tsconfig.json .oxlintrc.json"
+    "lint": "npx oxlint --config .oxlintrc.json src tests examples index.d.ts",
+    "format": "npx oxfmt src tests examples index.d.ts package.json tsconfig.json .oxlintrc.json",
+    "format:check": "npx oxfmt --check src tests examples index.d.ts package.json tsconfig.json .oxlintrc.json"
   },
   "keywords": [
     "sockudo",
@@ -79,7 +80,8 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/sockudo/sockudo-http-node.git"
+    "url": "git+https://github.com/sockudo/sockudo.git",
+    "directory": "server-sdks/sockudo-http-node"
   },
   "files": [
     "dist",

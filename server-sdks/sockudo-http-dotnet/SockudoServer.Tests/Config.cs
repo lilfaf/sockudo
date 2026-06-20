@@ -16,13 +16,28 @@ namespace SockudoServer.Tests
             {
                 try
                 {
-                    config = JsonFileConfigLoader.Default.Load();
-                    IsConfigured = IsRealConfig(config);
+                    IApplicationConfig fileConfig = JsonFileConfigLoader.Default.Load();
+                    if (IsRealConfig(fileConfig))
+                    {
+                        config = fileConfig;
+                        IsConfigured = true;
+                    }
                 }
                 catch (IgnoreException ex)
                 {
                     SkipReason = ex.Message;
                 }
+            }
+
+            if (!HasRequiredCredentials(config))
+            {
+                config = new ApplicationConfig
+                {
+                    AppId = "test-app-id",
+                    AppKey = "test-app-key",
+                    AppSecret = "test-app-secret",
+                    Cluster = "mt1",
+                };
             }
 
             AppId = config.AppId;
@@ -56,6 +71,14 @@ namespace SockudoServer.Tests
                    !string.IsNullOrWhiteSpace(config.AppKey) &&
                    !string.IsNullOrWhiteSpace(config.AppSecret) &&
                    !config.AppId.StartsWith("test-", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool HasRequiredCredentials(IApplicationConfig config)
+        {
+            return config != null &&
+                   !string.IsNullOrWhiteSpace(config.AppId) &&
+                   !string.IsNullOrWhiteSpace(config.AppKey) &&
+                   !string.IsNullOrWhiteSpace(config.AppSecret);
         }
     }
 }

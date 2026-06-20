@@ -4,7 +4,7 @@ using System.Linq;
 
 namespace PusherServer
 {
-    internal class WebHook: IWebHook
+    internal class WebHook : IWebHook
     {
         private readonly WebHookData _webHookData;
         private readonly List<string> _validationErrors;
@@ -12,7 +12,7 @@ namespace PusherServer
 
         internal WebHook(string secret, string signature, string body)
         {
-            if(string.IsNullOrEmpty(secret))
+            if (string.IsNullOrEmpty(secret))
             {
                 throw new ArgumentException("A secret must be provided", "secret");
             }
@@ -27,7 +27,8 @@ namespace PusherServer
             WebHookData parsedWebHookData = null;
 
             var signatureNullOrEmpth = string.IsNullOrEmpty(signature);
-            if(signatureNullOrEmpth == true) {
+            if (signatureNullOrEmpth == true)
+            {
                 this._validationErrors.Add("The supplied signature to check was null or empty. A signature to check must be provided.");
             }
 

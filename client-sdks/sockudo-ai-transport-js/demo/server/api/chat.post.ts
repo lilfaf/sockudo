@@ -26,7 +26,10 @@ export default defineEventHandler(async (event) => {
     inputEventId,
     ...(clientId === undefined ? {} : { clientId }),
     onCancel(request) {
-      return request.filter.all === true || request.turnOwners.get(turnId) === clientId;
+      return (
+        request.filter.all === true ||
+        request.turnOwners.get(turnId) === clientId
+      );
     },
     onError(error) {
       console.error("[sockudo-ai-transport-demo] turn failed", error.message);
@@ -93,7 +96,11 @@ function demoUiMessageStream(prompt: string): ReadableStream<VercelOutput> {
     { type: "reasoning-end", id: "reasoning-demo" },
     { type: "text-start", id: "text-demo" },
     ...words.flatMap((word) => [
-      { type: "text-delta", id: "text-demo", delta: `${word} ` } as VercelOutput,
+      {
+        type: "text-delta",
+        id: "text-demo",
+        delta: `${word} `,
+      } as VercelOutput,
     ]),
     {
       type: "text-delta",
@@ -121,7 +128,10 @@ function demoUiMessageStream(prompt: string): ReadableStream<VercelOutput> {
     {
       type: "tool-input-delta",
       toolCallId: "capability-scan",
-      delta: JSON.stringify({ prompt, checks: ["history", "branches", "cancel"] }),
+      delta: JSON.stringify({
+        prompt,
+        checks: ["history", "branches", "cancel"],
+      }),
     },
     {
       type: "tool-input-available",

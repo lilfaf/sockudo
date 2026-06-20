@@ -5,7 +5,10 @@ export default defineEventHandler(async (event) => {
   const socketId = stringValue(body.socket_id ?? body.socketId);
   const channelName = stringValue(body.channel_name ?? body.channelName);
   if (socketId === undefined || channelName === undefined) {
-    throw createError({ statusCode: 400, statusMessage: "missing auth fields" });
+    throw createError({
+      statusCode: 400,
+      statusMessage: "missing auth fields",
+    });
   }
   if (!isAllowedDemoChannel(channelName)) {
     throw createError({ statusCode: 403, statusMessage: "unexpected channel" });
