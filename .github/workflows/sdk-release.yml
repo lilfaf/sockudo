@@ -422,6 +422,9 @@ jobs:
     name: Release sockudo-kotlin
     runs-on: ubuntu-24.04
     environment: maven-central
+    concurrency:
+      group: sdk-release-maven-central
+      cancel-in-progress: false
     permissions:
       contents: read
     if: >-
@@ -457,12 +460,20 @@ jobs:
           MAVEN_GPG_KEY_ID: ${{ secrets.MAVEN_GPG_KEY_ID }}
           MAVEN_GPG_PRIVATE_KEY: ${{ secrets.MAVEN_GPG_PRIVATE_KEY }}
           MAVEN_GPG_PASSPHRASE: ${{ secrets.MAVEN_GPG_PASSPHRASE }}
-        run: ./gradlew --no-daemon :lib:publish
+        run: |
+          ./gradlew --no-daemon :lib:publish
+          token="$(printf '%s:%s' "$MAVEN_CENTRAL_USERNAME" "$MAVEN_CENTRAL_PASSWORD" | base64 | tr -d '\n')"
+          curl --fail-with-body --request POST \
+            --header "Authorization: Bearer $token" \
+            "https://ossrh-staging-api.central.sonatype.com/manual/upload/defaultRepository/io.sockudo?publishing_type=automatic"
 
   server-java:
     name: Release sockudo-http-java
     runs-on: ubuntu-24.04
     environment: maven-central
+    concurrency:
+      group: sdk-release-maven-central
+      cancel-in-progress: false
     permissions:
       contents: read
     if: >-
@@ -498,7 +509,12 @@ jobs:
           MAVEN_GPG_KEY_ID: ${{ secrets.MAVEN_GPG_KEY_ID }}
           MAVEN_GPG_PRIVATE_KEY: ${{ secrets.MAVEN_GPG_PRIVATE_KEY }}
           MAVEN_GPG_PASSPHRASE: ${{ secrets.MAVEN_GPG_PASSPHRASE }}
-        run: ./gradlew --no-daemon publish
+        run: |
+          ./gradlew --no-daemon publish
+          token="$(printf '%s:%s' "$MAVEN_CENTRAL_USERNAME" "$MAVEN_CENTRAL_PASSWORD" | base64 | tr -d '\n')"
+          curl --fail-with-body --request POST \
+            --header "Authorization: Bearer $token" \
+            "https://ossrh-staging-api.central.sonatype.com/manual/upload/defaultRepository/io.sockudo?publishing_type=automatic"
 
   client-flutter:
     name: Gate sockudo_flutter

@@ -101,7 +101,9 @@ Packages: `io.sockudo:sockudo-kotlin`, `io.sockudo:sockudo-http-java`
 5. Keep the `maven-central` GitHub environment protected.
 
 Maven Central still requires signing. The Gradle builds publish through the Central Portal OSSRH
-Staging API compatibility endpoint.
+Staging API compatibility endpoint. Java and Kotlin releases are serialized by the workflow, and
+each job asks the OSSRH Staging API to upload the completed `io.sockudo` deployment to Central
+Portal with automatic publishing.
 
 ### pub.dev
 
