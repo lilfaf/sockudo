@@ -1,3 +1,5 @@
+import java.util.Base64
+
 plugins {
     alias(libs.plugins.kotlin.jvm)
     alias(libs.plugins.kotlin.serialization)
@@ -102,8 +104,23 @@ publishing {
 }
 
 signing {
+    fun normalizeSigningKey(key: String?): String? {
+        if (key.isNullOrBlank()) {
+            return key
+        }
+        val normalized = key.replace("\\n", "\n").trim()
+        if (normalized.startsWith("-----BEGIN PGP PRIVATE KEY BLOCK-----")) {
+            return normalized
+        }
+        return runCatching {
+            String(Base64.getDecoder().decode(normalized), Charsets.UTF_8)
+                .replace("\\n", "\n")
+                .trim()
+        }.getOrElse { normalized }
+    }
+
     val signingKey =
-        (findProperty("signingInMemoryKey") as String?) ?: System.getenv("MAVEN_GPG_PRIVATE_KEY")
+        normalizeSigningKey((findProperty("signingInMemoryKey") as String?) ?: System.getenv("MAVEN_GPG_PRIVATE_KEY"))
     val signingKeyId =
         (findProperty("signingInMemoryKeyId") as String?) ?: System.getenv("MAVEN_GPG_KEY_ID")
     val signingPassword =

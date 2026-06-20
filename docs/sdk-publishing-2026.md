@@ -38,8 +38,9 @@ or signing credentials:
 | `MAVEN_CENTRAL_USERNAME` | Maven Central | Central Portal user token username |
 | `MAVEN_CENTRAL_PASSWORD` | Maven Central | Central Portal user token password |
 | `MAVEN_GPG_KEY_ID` | Maven Central | signing key id |
-| `MAVEN_GPG_PRIVATE_KEY` | Maven Central | ASCII-armored private key |
+| `MAVEN_GPG_PRIVATE_KEY` | Maven Central | ASCII-armored private key, escaped-newline string, or base64-encoded ASCII-armored key |
 | `MAVEN_GPG_PASSPHRASE` | Maven Central | signing key passphrase |
+| `CRATES_IO_TOKEN` | crates.io | fallback token used only when trusted publishing is not configured |
 
 ## Browser Setup Checklist
 
@@ -133,7 +134,8 @@ Package: `sockudo-http`
 3. Add a trusted publisher for `sdk-release.yml`.
 4. Use environment `crates.io`.
 
-The workflow exchanges GitHub OIDC for a short-lived crates.io token.
+The workflow exchanges GitHub OIDC for a short-lived crates.io token. If trusted publishing is not
+configured yet, it falls back to `CRATES_IO_TOKEN`.
 
 ### Packagist
 

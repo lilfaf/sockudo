@@ -143,7 +143,23 @@ publishing {
 }
 
 signing {
-    def signingKey = findProperty("signingInMemoryKey") ?: System.getenv("MAVEN_GPG_PRIVATE_KEY")
+    def normalizeSigningKey = { key ->
+        if (!key) {
+            return key
+        }
+        def normalized = key.replace("\\n", "\n").trim()
+        if (normalized.startsWith("-----BEGIN PGP PRIVATE KEY BLOCK-----")) {
+            return normalized
+        }
+        try {
+            return new String(java.util.Base64.getDecoder().decode(normalized), java.nio.charset.StandardCharsets.UTF_8)
+                    .replace("\\n", "\n")
+                    .trim()
+        } catch (IllegalArgumentException ignored) {
+            return normalized
+        }
+    }
+    def signingKey = normalizeSigningKey(findProperty("signingInMemoryKey") ?: System.getenv("MAVEN_GPG_PRIVATE_KEY"))
     def signingKeyId = findProperty("signingInMemoryKeyId") ?: System.getenv("MAVEN_GPG_KEY_ID")
     def signingPassword = findProperty("signingInMemoryKeyPassword") ?: System.getenv("MAVEN_GPG_PASSPHRASE")
     required { signingKey }
