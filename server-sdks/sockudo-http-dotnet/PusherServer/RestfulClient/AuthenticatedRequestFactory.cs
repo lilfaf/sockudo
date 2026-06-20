@@ -70,7 +70,7 @@ namespace PusherServer.RestfulClient
                 var bodyMd5 = CryptoHelper.GetMd5Hash(bodyDataJson);
                 parameters.Add("body_md5", bodyMd5);
             }
-            
+
             return parameters;
         }
 

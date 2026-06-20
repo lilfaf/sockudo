@@ -277,6 +277,7 @@ jobs:
       - name: Verify package
         run: |
           npm ci
+          npm run format:check
           npm run lint
           npm run typecheck
           npm run local-test
@@ -364,6 +365,11 @@ jobs:
           dotnet-version: 10.0.x
 
       - name: Verify and pack packages
+        env:
+          PUSHER_APP_ID: test-app-id
+          PUSHER_APP_KEY: test-app-key
+          PUSHER_APP_SECRET: test-app-secret
+          PUSHER_APP_CLUSTER: mt1
         run: |
           dotnet restore sockudo-dotnet-server.sln
           dotnet restore pusher-dotnet-server.sln
@@ -559,6 +565,9 @@ jobs:
           bundler-cache: true
           working-directory: server-sdks/sockudo-http-ruby
 
+      - name: Install native dependencies
+        run: sudo apt-get update && sudo apt-get install -y libsodium-dev
+
       - name: Verify package
         working-directory: server-sdks/sockudo-http-ruby
         run: |
@@ -691,7 +700,7 @@ jobs:
 
   client-swift:
     name: Gate SockudoSwift
-    runs-on: macos-15
+    runs-on: macos-26
     if: >-
       ${{
         (github.event_name == 'workflow_dispatch' && (inputs.package == 'all' || inputs.package == 'client-swift')) ||
@@ -713,8 +722,8 @@ jobs:
           swift package resolve
           swift build
           swift test
-          swiftlint lint --strict --path Sources
-          swiftlint lint --strict --path Tests
+          swiftlint lint --strict Sources
+          swiftlint lint --strict Tests
 
       - name: Swift package publish notice
         if: ${{ github.event_name == 'push' || inputs.dry_run == false }}
@@ -745,8 +754,8 @@ jobs:
           swift package resolve
           swift build
           swift test
-          swiftlint lint --strict --path Sources
-          swiftlint lint --strict --path Tests
+          swiftlint lint --strict Sources
+          swiftlint lint --strict Tests
 
       - name: Swift package publish notice
         if: ${{ github.event_name == 'push' || inputs.dry_run == false }}

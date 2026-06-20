@@ -77,7 +77,7 @@ namespace PusherServer
         {
             int encryptedChannelCount = 0;
             int channelCount = 0;
-            foreach(string name in channelNames)
+            foreach (string name in channelNames)
             {
                 ValidateChannelName(name);
                 if (Pusher.IsPrivateEncryptedChannel(name))

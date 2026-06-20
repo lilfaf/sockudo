@@ -375,7 +375,8 @@ module Sockudo
 
     # Activate or create a push device registration with admin scope
     def activate_device(device, options = {})
-      post(push_path('/deviceRegistrations'), device, push_headers('push-admin', nil, options[:rotate_device_identity_token]))
+      post(push_path('/deviceRegistrations'), device,
+           push_headers('push-admin', nil, rotate_device_identity_token: options[:rotate_device_identity_token]))
     end
 
     # Alias of activate_device
@@ -792,7 +793,7 @@ module Sockudo
       data.is_a?(Hash) && data.key?(:id) && !data[:id].empty? && data[:id].is_a?(String)
     end
 
-    def push_headers(capability = 'push-admin', device_identity_token = nil, rotate_device_identity_token = false)
+    def push_headers(capability = 'push-admin', device_identity_token = nil, rotate_device_identity_token: false)
       headers = { 'X-Sockudo-Push-Capability' => capability }
       headers['X-Sockudo-Device-Identity-Token'] = device_identity_token if device_identity_token
       headers['X-Sockudo-Rotate-Device-Identity-Token'] = 'true' if rotate_device_identity_token

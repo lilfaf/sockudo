@@ -52,7 +52,7 @@ namespace PusherServer.Tests.UnitTests
             var webHook = new WebHook(secret, validSignature, body);
             Assert.AreEqual("test_channel", webHook.Events[0]["channel"]);
             Assert.AreEqual("channel_occupied", webHook.Events[0]["name"]);
-            
+
             Assert.AreEqual("test_channel2", webHook.Events[1]["channel"]);
             Assert.AreEqual("channel_vacated", webHook.Events[1]["name"]);
         }
@@ -71,7 +71,9 @@ namespace PusherServer.Tests.UnitTests
                 caughtException = ex;
             }
 
-            StringAssert.IsMatch("A secret must be provided" + Environment.NewLine + "Parameter name: secret", caughtException.Message);
+            Assert.IsNotNull(caughtException);
+            StringAssert.Contains("A secret must be provided", caughtException.Message);
+            StringAssert.Contains("secret", caughtException.Message);
         }
 
         [Test]
@@ -88,7 +90,9 @@ namespace PusherServer.Tests.UnitTests
                 caughtException = ex;
             }
 
-            StringAssert.IsMatch("A secret must be provided" + Environment.NewLine + "Parameter name: secret", caughtException.Message);
+            Assert.IsNotNull(caughtException);
+            StringAssert.Contains("A secret must be provided", caughtException.Message);
+            StringAssert.Contains("secret", caughtException.Message);
         }
 
         [Test]

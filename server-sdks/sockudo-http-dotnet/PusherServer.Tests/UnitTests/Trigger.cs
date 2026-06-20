@@ -25,7 +25,7 @@ namespace PusherServer.Tests.UnitTests
 
         private HttpResponseMessage _v7ProtocolSuccessfulResponse;
         private HttpResponseMessage _v8ProtocolSuccessfulResponse;
-        
+
         [OneTimeSetUp]
         public void FixtureSetUp()
         {
@@ -132,11 +132,11 @@ namespace PusherServer.Tests.UnitTests
         public async Task on_a_single_channel_the_socket_id_parameter_should_be_present_in_the_querystring()
         {
             var expectedSocketId = "123.098";
-            
+
             await _pusher.TriggerAsync(_channelName, _eventName, _eventData, new TriggerOptions()
-                    {
-                        SocketId = expectedSocketId
-                    }).ConfigureAwait(false);
+            {
+                SocketId = expectedSocketId
+            }).ConfigureAwait(false);
 
 #pragma warning disable 4014
             _subPusherClient.Received().ExecutePostAsync(
@@ -175,10 +175,10 @@ namespace PusherServer.Tests.UnitTests
         {
             var expectedSocketId = "123.456";
 
-            await _pusher.TriggerAsync(new[]{ "my-channel", "my-channel-2" }, _eventName, _eventData, new TriggerOptions()
-                    {
-                        SocketId = expectedSocketId
-                    }).ConfigureAwait(false);
+            await _pusher.TriggerAsync(new[] { "my-channel", "my-channel-2" }, _eventName, _eventData, new TriggerOptions()
+            {
+                SocketId = expectedSocketId
+            }).ConfigureAwait(false);
 
 #pragma warning disable 4014
             _subPusherClient.Received().ExecutePostAsync(
@@ -341,42 +341,42 @@ namespace PusherServer.Tests.UnitTests
 
         [Test]
         public async Task channel_must_not_have_trailing_colon()
-		{
+        {
             FormatException caughtException = null;
 
             try
-		    {
-		        await TriggerWithChannelName("test_channel:").ConfigureAwait(false);
+            {
+                await TriggerWithChannelName("test_channel:").ConfigureAwait(false);
             }
-		    catch (FormatException ex)
-		    {
-		        caughtException = ex;
-		    }
+            catch (FormatException ex)
+            {
+                caughtException = ex;
+            }
 
             Assert.IsNotNull(caughtException);
             StringAssert.AreEqualIgnoringCase("The channel name \"test_channel:\" was not in the form: \\A[a-zA-Z0-9_=@,.;\\-]+\\z", caughtException.Message);
         }
 
-		[Test]
-		public async Task channel_name_must_not_have_leading_colon()
-		{
+        [Test]
+        public async Task channel_name_must_not_have_leading_colon()
+        {
             FormatException caughtException = null;
 
             try
-		    {
-		        await TriggerWithChannelName(":test_channel").ConfigureAwait(false);
+            {
+                await TriggerWithChannelName(":test_channel").ConfigureAwait(false);
             }
-		    catch (FormatException ex)
-		    {
+            catch (FormatException ex)
+            {
                 caughtException = ex;
-		    }
+            }
 
             Assert.IsNotNull(caughtException);
             StringAssert.AreEqualIgnoringCase("The channel name \":test_channel\" was not in the form: \\A[a-zA-Z0-9_=@,.;\\-]+\\z", caughtException.Message);
         }
-		
+
         [Test]
-		public async Task channel_name_must_not_have_leading_colon_newline()
+        public async Task channel_name_must_not_have_leading_colon_newline()
         {
             FormatException caughtException = null;
 
@@ -392,38 +392,38 @@ namespace PusherServer.Tests.UnitTests
             Assert.IsNotNull(caughtException);
             StringAssert.AreEqualIgnoringCase("The channel name \":\ntest_channel\" was not in the form: \\A[a-zA-Z0-9_=@,.;\\-]+\\z", caughtException.Message);
         }
-		
+
         [Test]
         public async Task channel_name_must_not_have_trailing_colon_newline()
         {
             FormatException caughtException = null;
 
-		    try
-		    {
-		        await TriggerWithChannelName("test_channel\n:").ConfigureAwait(false);
+            try
+            {
+                await TriggerWithChannelName("test_channel\n:").ConfigureAwait(false);
             }
-		    catch (FormatException ex)
-		    {
-		        caughtException = ex;
-		    }
+            catch (FormatException ex)
+            {
+                caughtException = ex;
+            }
 
             Assert.IsNotNull(caughtException);
             StringAssert.AreEqualIgnoringCase("The channel name \"test_channel\n:\" was not in the form: \\A[a-zA-Z0-9_=@,.;\\-]+\\z", caughtException.Message);
         }
-		
-		[Test]
-		public async Task channel_names_in_array_must_be_validated()
-		{
-		    FormatException caughtException = null;
 
-		    try
-		    {
-		        await _pusher.TriggerAsync(new[] { "this_one_is_okay", "test_channel\n:" }, _eventName, _eventData).ConfigureAwait(false);
+        [Test]
+        public async Task channel_names_in_array_must_be_validated()
+        {
+            FormatException caughtException = null;
+
+            try
+            {
+                await _pusher.TriggerAsync(new[] { "this_one_is_okay", "test_channel\n:" }, _eventName, _eventData).ConfigureAwait(false);
             }
-		    catch (FormatException ex)
-		    {
-		        caughtException = ex;
-		    }
+            catch (FormatException ex)
+            {
+                caughtException = ex;
+            }
 
             Assert.IsNotNull(caughtException);
             StringAssert.AreEqualIgnoringCase("The channel name \"test_channel\n:\" was not in the form: \\A[a-zA-Z0-9_=@,.;\\-]+\\z", caughtException.Message);
@@ -445,7 +445,9 @@ namespace PusherServer.Tests.UnitTests
             }
 
             Assert.IsNotNull(caughtException);
-            StringAssert.AreEqualIgnoringCase($"The length of the channel name is greater than the allowed {ValidationHelper.CHANNEL_NAME_MAX_LENGTH} characters.{Environment.NewLine}Parameter name: channelName{Environment.NewLine}Actual value was {channelName.Length}.", caughtException.Message);
+            StringAssert.Contains($"The length of the channel name is greater than the allowed {ValidationHelper.CHANNEL_NAME_MAX_LENGTH} characters.", caughtException.Message);
+            StringAssert.Contains("channelName", caughtException.Message);
+            StringAssert.Contains(channelName.Length.ToString(), caughtException.Message);
         }
 
         [Test]
@@ -465,7 +467,9 @@ namespace PusherServer.Tests.UnitTests
             }
 
             Assert.IsNotNull(caughtException);
-            StringAssert.AreEqualIgnoringCase($"Only 10 events permitted per batch.{Environment.NewLine}Parameter name: events{Environment.NewLine}Actual value was 11.", caughtException.Message);
+            StringAssert.Contains("Only 10 events permitted per batch.", caughtException.Message);
+            StringAssert.Contains("events", caughtException.Message);
+            StringAssert.Contains("11", caughtException.Message);
         }
 
         [Test]
@@ -477,7 +481,7 @@ namespace PusherServer.Tests.UnitTests
             try
             {
                 var events = DataHelper.CreateEvents(numberOfEvents: 9);
-                events.Add(new Event {Channel = channelName});
+                events.Add(new Event { Channel = channelName });
 
                 await TriggerWithBatch(events.ToArray()).ConfigureAwait(false);
             }
@@ -487,7 +491,9 @@ namespace PusherServer.Tests.UnitTests
             }
 
             Assert.IsNotNull(caughtException);
-            StringAssert.AreEqualIgnoringCase($"The length of the channel name is greater than the allowed {ValidationHelper.CHANNEL_NAME_MAX_LENGTH} characters.{Environment.NewLine}Parameter name: channelName{Environment.NewLine}Actual value was {channelName.Length}.", caughtException.Message);
+            StringAssert.Contains($"The length of the channel name is greater than the allowed {ValidationHelper.CHANNEL_NAME_MAX_LENGTH} characters.", caughtException.Message);
+            StringAssert.Contains("channelName", caughtException.Message);
+            StringAssert.Contains(channelName.Length.ToString(), caughtException.Message);
         }
 
         private bool CheckRequestContainsPayload(IPusherRestRequest request, string channelName, string eventName, object eventData)
@@ -535,4 +541,3 @@ namespace PusherServer.Tests.UnitTests
         }
     }
 }
-

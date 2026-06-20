@@ -22,7 +22,7 @@ namespace PusherServer.RestfulClient
         /// <param name="libraryName"></param>
         /// <param name="version"></param>
         public PusherRestClient(string baseAddress, string libraryName, Version version) : this(new Uri(baseAddress), libraryName, version)
-        {}
+        { }
 
         /// <summary>
         /// Constructs a new instance of the PusherRestClient with a supplied HttpClient
@@ -30,18 +30,18 @@ namespace PusherServer.RestfulClient
         /// <param name="baseAddress">The base address of the Pusher API</param>
         /// <param name="libraryName">The name of the Pusher Library</param>
         /// <param name="version">The version of the Pusher library</param>
-        public PusherRestClient(Uri baseAddress, string libraryName, Version version):this(CreateDefaultHttpClient(baseAddress), libraryName, version)
-        {}
+        public PusherRestClient(Uri baseAddress, string libraryName, Version version) : this(CreateDefaultHttpClient(baseAddress), libraryName, version)
+        { }
 
         private static HttpClient CreateDefaultHttpClient(Uri baseAddress)
         {
-            return new HttpClient 
-            { 
+            return new HttpClient
+            {
                 BaseAddress = baseAddress,
                 Timeout = TimeSpan.FromSeconds(30),
             };
         }
-        
+
         /// <summary>
         /// Constructs a new instance of the PusherRestClient with a supplied HttpClient
         /// </summary>
@@ -60,8 +60,9 @@ namespace PusherServer.RestfulClient
         }
 
         ///<inheritDoc/>
-        public Uri BaseUrl {
-            get { return _httpClient.BaseAddress; } 
+        public Uri BaseUrl
+        {
+            get { return _httpClient.BaseAddress; }
         }
 
         ///<inheritDoc/>

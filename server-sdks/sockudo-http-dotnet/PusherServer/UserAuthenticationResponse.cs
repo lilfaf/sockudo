@@ -4,7 +4,7 @@ using System.Runtime.Serialization;
 namespace PusherServer
 {
     [DataContract]
-    class UserAuthenticationResponse: IUserAuthenticationResponse
+    class UserAuthenticationResponse : IUserAuthenticationResponse
     {
         private readonly string _appKey;
         private readonly string _appSecret;
@@ -32,7 +32,7 @@ namespace PusherServer
             {
                 var userDataJson = DefaultSerializer.Default.Serialize(_userData);
                 var stringToSign = _socketId + "::user::" + userDataJson;
-                
+
                 return _appKey + ":" + CryptoHelper.GetHmac256(_appSecret, stringToSign);
             }
         }

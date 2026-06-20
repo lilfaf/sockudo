@@ -36,6 +36,9 @@ namespace SockudoServer.Tests.UnitTests
             _subSockudoClient
                 .ExecutePostAsync(Arg.Any<ISockudoRestRequest>())
                 .Returns(Task.FromResult(new TriggerResult(_successfulResponse, TriggerResultHelper.TRIGGER_RESPONSE_JSON)));
+            _subSockudoClient
+                .ExecutePostRawAsync(Arg.Any<ISockudoRestRequest>())
+                .Returns(Task.FromResult(new RawRequestResult(_successfulResponse, TriggerResultHelper.TRIGGER_RESPONSE_JSON)));
         }
 
         [Test]
@@ -74,7 +77,7 @@ namespace SockudoServer.Tests.UnitTests
             await _sockudo.UpdateMessageAsync<object>("chat:room-1", "msg:1", new { data = "hello brave" }).ConfigureAwait(false);
 
 #pragma warning disable 4014
-            _subSockudoClient.Received().ExecutePostAsync(
+            _subSockudoClient.Received().ExecutePostRawAsync(
 #pragma warning restore 4014
                 Arg.Is<ISockudoRestRequest>(
                     x => x.ResourceUri.StartsWith("/apps/" + _config.AppId + "/channels/chat:room-1/messages/msg:1/update")
@@ -88,7 +91,7 @@ namespace SockudoServer.Tests.UnitTests
             await _sockudo.DeleteMessageAsync<object>("chat:room-1", "msg:1", new { clear_fields = new[] { "data", "extras" } }).ConfigureAwait(false);
 
 #pragma warning disable 4014
-            _subSockudoClient.Received().ExecutePostAsync(
+            _subSockudoClient.Received().ExecutePostRawAsync(
 #pragma warning restore 4014
                 Arg.Is<ISockudoRestRequest>(
                     x => x.ResourceUri.StartsWith("/apps/" + _config.AppId + "/channels/chat:room-1/messages/msg:1/delete")
@@ -102,7 +105,7 @@ namespace SockudoServer.Tests.UnitTests
             await _sockudo.AppendMessageAsync<object>("chat:room-1", "msg:1", new { data = " world" }).ConfigureAwait(false);
 
 #pragma warning disable 4014
-            _subSockudoClient.Received().ExecutePostAsync(
+            _subSockudoClient.Received().ExecutePostRawAsync(
 #pragma warning restore 4014
                 Arg.Is<ISockudoRestRequest>(
                     x => x.ResourceUri.StartsWith("/apps/" + _config.AppId + "/channels/chat:room-1/messages/msg:1/append")

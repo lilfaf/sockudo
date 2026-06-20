@@ -67,17 +67,18 @@ namespace PusherServer
         /// <inheritDoc/>
         public string Cluster
         {
-          get
-          {
-            return _cluster;
-          }
-          set
-          {
-            if (_hostSet == false) {
-              _cluster = value;
-              _hostName = "api-"+_cluster+".pusher.com";
+            get
+            {
+                return _cluster;
             }
-          }
+            set
+            {
+                if (_hostSet == false)
+                {
+                    _cluster = value;
+                    _hostName = "api-" + _cluster + ".pusher.com";
+                }
+            }
         }
 
         /// <inheritDoc/>
