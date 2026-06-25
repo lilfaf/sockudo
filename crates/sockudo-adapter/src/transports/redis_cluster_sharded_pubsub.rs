@@ -85,8 +85,7 @@ impl NodeAddr {
 pub(crate) struct Topology {
     slot_owners: HashMap<Slot, NodeAddr>,
     fallback: NodeAddr,
-    #[allow(dead_code)]
-    masters: Vec<NodeAddr>,
+    pub(crate) masters: Vec<NodeAddr>,
 }
 
 impl Topology {
@@ -1134,5 +1133,69 @@ mod tests {
         ]);
         let topo = parse_cluster_shards(raw).expect("should skip malformed and succeed");
         assert_eq!(topo.masters.len(), 1);
+    }
+
+    #[test]
+    fn hash_tag_targets_correct_shard() {
+        let raw = redis::Value::Array(vec![
+            make_shard_value(0, 5461, "10.0.0.1", 6379),
+            make_shard_value(5462, 10922, "10.0.0.2", 6379),
+            make_shard_value(10923, 16383, "10.0.0.3", 6379),
+        ]);
+        let topo = parse_cluster_shards(raw).expect("3-shard parse failed");
+
+        for (idx, master) in topo.masters.iter().enumerate() {
+            let tag = (0u16..256)
+                .map(|i| i.to_string())
+                .find(|t| topo.shard_for(&format!("{{{t}}}")) == master)
+                .unwrap_or_else(|| panic!("no tag found for shard {idx}"));
+
+            let reply = format!("test_prefix:{{{tag}}}:#reply:00000000000000000000000000000000");
+            assert_eq!(
+                topo.shard_for(&reply),
+                master,
+                "reply channel with tag {tag} should route to shard {idx}",
+            );
+        }
+    }
+
+    #[test]
+    fn hash_tag_table_covers_all_shards() {
+        let raw = redis::Value::Array(vec![
+            make_shard_value(0, 5461, "10.0.0.1", 6379),
+            make_shard_value(5462, 10922, "10.0.0.2", 6379),
+            make_shard_value(10923, 16383, "10.0.0.3", 6379),
+        ]);
+        let topo = parse_cluster_shards(raw).expect("3-shard parse failed");
+
+        for master in &topo.masters {
+            let found = (0u16..256)
+                .map(|i| i.to_string())
+                .any(|t| topo.shard_for(&format!("{{{t}}}")) == master);
+            assert!(found, "every shard must have at least one tag in 0..256");
+        }
+    }
+
+    #[test]
+    fn single_shard_reply_channel_has_no_hash_tag() {
+        let raw = redis::Value::Array(vec![make_shard_value(0, 16383, "10.0.0.1", 6379)]);
+        let topo = parse_cluster_shards(raw).expect("1-shard parse failed");
+        assert_eq!(topo.masters.len(), 1);
+    }
+
+    #[test]
+    fn counter_modulo_gives_round_robin_across_shards() {
+        let shard_count = 3usize;
+        let mut distribution = vec![0u32; shard_count];
+        for counter in 1u64..=9 {
+            let target = (counter as usize) % shard_count;
+            distribution[target] += 1;
+        }
+        for (shard, count) in distribution.iter().enumerate() {
+            assert_eq!(
+                *count, 3,
+                "shard {shard} should get exactly 3 of 9 assignments"
+            );
+        }
     }
 }

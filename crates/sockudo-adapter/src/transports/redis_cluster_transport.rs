@@ -1,5 +1,6 @@
 use crate::horizontal_adapter::{BroadcastMessage, RequestBody, ResponseBody};
 use crate::horizontal_transport::{HorizontalTransport, TransportConfig, TransportHandlers};
+use crate::transports::redis_cluster_sharded_pubsub::Topology;
 use async_trait::async_trait;
 use redis::cluster_read_routing::RandomReplicaStrategy;
 use sockudo_core::error::{Error, Result};
@@ -69,6 +70,7 @@ pub struct RedisClusterTransport {
     use_sharded_pubsub: bool,
     prefix: String,
     reply_channel: String,
+    shard_tags: Vec<String>,
     metrics: Arc<OnceLock<Arc<dyn MetricsInterface + Send + Sync>>>,
     shutdown: Arc<Notify>,
     is_running: Arc<AtomicBool>,
@@ -106,8 +108,33 @@ impl HorizontalTransport for RedisClusterTransport {
         let request_channel = format!("{}:#requests", config.prefix);
         let response_channel = format!("{}:#responses", config.prefix);
         let prefix = config.prefix.clone();
+        let shard_tags: Vec<String> = match Topology::discover(&config.nodes).await {
+            Ok(topo) if topo.masters.len() > 1 => topo
+                .masters
+                .iter()
+                .map(|master| {
+                    (0u16..256)
+                        .map(|i| i.to_string())
+                        .find(|t| topo.shard_for(&format!("{{{t}}}")) == master)
+                        .unwrap_or_else(|| "0".to_string())
+                })
+                .collect(),
+            _ => vec![],
+        };
+
         let uuid = Uuid::new_v4();
-        let reply_channel = format!("{}:#reply:{}", prefix, uuid.as_simple());
+        let uuid_str = uuid.as_simple().to_string();
+        let reply_channel = match shard_tag_for_id(&uuid_str, &shard_tags) {
+            Some(tag) => {
+                info!(
+                    hash_tag = %tag,
+                    shard_count = shard_tags.len(),
+                    "reply channel placed on target shard",
+                );
+                format!("{prefix}:{{{tag}}}:#reply:{uuid_str}")
+            }
+            None => format!("{prefix}:#reply:{uuid_str}"),
+        };
 
         let use_sharded_pubsub = config.use_sharded_pubsub;
 
@@ -134,6 +161,7 @@ impl HorizontalTransport for RedisClusterTransport {
             use_sharded_pubsub,
             prefix,
             reply_channel,
+            shard_tags,
             metrics: Arc::new(OnceLock::new()),
             shutdown: Arc::new(Notify::new()),
             is_running: Arc::new(AtomicBool::new(true)),
@@ -304,7 +332,10 @@ impl HorizontalTransport for RedisClusterTransport {
         request: &RequestBody,
         target_node_id: &str,
     ) -> Result<()> {
-        let target_channel = format!("{}:#node:{}", self.prefix, target_node_id);
+        let target_channel = match shard_tag_for_id(target_node_id, &self.shard_tags) {
+            Some(tag) => format!("{}:{{{}}}:#node:{}", self.prefix, tag, target_node_id),
+            None => format!("{}:#node:{}", self.prefix, target_node_id),
+        };
         let request_json = sonic_rs::to_string(request)
             .map_err(|e| Error::Other(format!("Failed to serialize request: {e}")))?;
         let mut conn = self.publish_connection.clone();
@@ -337,7 +368,10 @@ impl HorizontalTransport for RedisClusterTransport {
         let metrics = self.metrics.clone();
         let shutdown = self.shutdown.clone();
         let is_running = self.is_running.clone();
-        let node_channel = format!("{}:#node:{}", self.prefix, handlers.node_id);
+        let node_channel = match shard_tag_for_id(&handlers.node_id, &self.shard_tags) {
+            Some(tag) => format!("{}:{{{}}}:#node:{}", self.prefix, tag, handlers.node_id),
+            None => format!("{}:#node:{}", self.prefix, handlers.node_id),
+        };
         let reply_channel = self.reply_channel.clone();
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
 
@@ -672,6 +706,16 @@ impl HorizontalTransport for RedisClusterTransport {
     }
 }
 
+fn shard_tag_for_id<'a>(id: &str, shard_tags: &'a [String]) -> Option<&'a str> {
+    if shard_tags.is_empty() {
+        return None;
+    }
+    let hash = id
+        .bytes()
+        .fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
+    Some(&shard_tags[(hash as usize) % shard_tags.len()])
+}
+
 impl Drop for RedisClusterTransport {
     fn drop(&mut self) {
         if self.owner_count.fetch_sub(1, Ordering::AcqRel) == 1 {
@@ -695,6 +739,7 @@ impl Clone for RedisClusterTransport {
             use_sharded_pubsub: self.use_sharded_pubsub,
             prefix: self.prefix.clone(),
             reply_channel: self.reply_channel.clone(),
+            shard_tags: self.shard_tags.clone(),
             metrics: self.metrics.clone(),
             shutdown: self.shutdown.clone(),
             is_running: self.is_running.clone(),
