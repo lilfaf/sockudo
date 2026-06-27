@@ -871,7 +871,8 @@ async fn ai_transport_concurrent_turns_cancel_and_codec_metadata_round_trip_e2e(
     let harness = build_harness(options).await;
     let channel = "ai-session-concurrent";
 
-    let (observer_socket, mut observer_reader) = connect_v2_socket(&harness).await;
+    let (observer_socket, mut observer_reader) =
+        connect_v2_socket_with_append_mode(&harness, sockudo_protocol::AppendMode::Full).await;
     subscribe_v2(
         &harness,
         &observer_socket,
