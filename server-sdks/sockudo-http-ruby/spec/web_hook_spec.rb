@@ -138,6 +138,8 @@ describe Sockudo::WebHook do
       }
 
       wh = Sockudo::WebHook.new(request, @client)
+      @client.key = '1234'
+      @client.secret = 'asdf'
 
       expect(wh).to be_valid
       expect(wh.time).to eq(Time.at(1_710_000_000))
@@ -172,6 +174,8 @@ describe Sockudo::WebHook do
       }
 
       wh = Sockudo::WebHook.new(request, @client)
+      @client.key = '1234'
+      @client.secret = 'asdf'
 
       expect(wh).to be_valid
       expect(wh.events[0]['name']).to eq('ai_turn_started')

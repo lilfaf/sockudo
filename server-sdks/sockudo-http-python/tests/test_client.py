@@ -46,7 +46,9 @@ def make_client(handler):
 
 def load_forward_fixture(name):
     for parent in Path(__file__).resolve().parents:
-        candidate = parent / "tests" / "ai-conformance" / "fixtures" / "forward-compat" / name
+        candidate = (
+            parent / "tests" / "ai-conformance" / "fixtures" / "forward-compat" / name
+        )
         if candidate.exists():
             return candidate.read_text(encoding="utf-8")
     raise AssertionError(f"forward-compat fixture not found: {name}")

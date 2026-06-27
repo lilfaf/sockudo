@@ -395,9 +395,7 @@ class TokenAuthData:
 
 
 TokenAuthResult = Union[str, TokenAuthData]
-TokenAuthCallback = Callable[
-    [], Union[TokenAuthResult, Awaitable[TokenAuthResult]]
-]
+TokenAuthCallback = Callable[[], Union[TokenAuthResult, Awaitable[TokenAuthResult]]]
 
 
 @dataclass
@@ -2447,10 +2445,10 @@ class SockudoClient:
             options.append_rollup_window is not None
             and options.append_rollup_window not in _ALLOWED_APPEND_ROLLUP_WINDOWS
         ):
-            allowed = ", ".join(str(value) for value in sorted(_ALLOWED_APPEND_ROLLUP_WINDOWS))
-            raise InvalidOptions(
-                f"append_rollup_window must be one of: {allowed}"
+            allowed = ", ".join(
+                str(value) for value in sorted(_ALLOWED_APPEND_ROLLUP_WINDOWS)
             )
+            raise InvalidOptions(f"append_rollup_window must be one of: {allowed}")
         self.key = key
         self.options = options
         self.prefix = ProtocolPrefix(options.protocol_version)
@@ -2856,7 +2854,9 @@ class SockudoClient:
             if issued_at_ms is not None
             else self._timestamp(None, payload.get("issued_at"), payload.get("iat"))
         )
-        expires_at = self._timestamp(None, payload.get("expires_at"), payload.get("exp"))
+        expires_at = self._timestamp(
+            None, payload.get("expires_at"), payload.get("exp")
+        )
         expires_at_ms = _coerce_int(payload.get("expires_at_ms"))
         expires_in = payload.get("expires_in")
         if expires_at_ms is not None:

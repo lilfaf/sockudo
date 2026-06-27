@@ -27,7 +27,9 @@ def fixture_raw(name: str) -> str:
 
 
 @pytest.mark.asyncio
-async def test_replays_forward_compat_fixtures_without_corrupting_channel_state() -> None:
+async def test_replays_forward_compat_fixtures_without_corrupting_channel_state() -> (
+    None
+):
     client = SockudoClient(
         "app-key",
         SockudoOptions(
@@ -217,7 +219,9 @@ def test_protobuf_decodes_uint64_serials_and_ai_extras() -> None:
 
 
 @pytest.mark.asyncio
-async def test_unknown_presence_events_and_malformed_members_do_not_corrupt_map() -> None:
+async def test_unknown_presence_events_and_malformed_members_do_not_corrupt_map() -> (
+    None
+):
     client = SockudoClient("app-key", SockudoOptions(cluster="local", force_tls=False))
     channel = client.subscribe("presence-ai-forward")
     assert isinstance(channel, PresenceChannel)
